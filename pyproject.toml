@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "btrbak"
+version = "0.1.0"
+description = "btrfs snapshot and offsite backup utility"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6"]
+
+[project.scripts]
+btrbak = "cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["cli", "config", "timespan", "snapshot", "send", "manifest", "retention", "restore", "util"]
+packages = ["remotes"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
