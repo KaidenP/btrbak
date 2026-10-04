@@ -112,7 +112,9 @@ def discover_configs(subvol=None) -> list[Config]:
         return configs
 
     if CONFIG_DIR.is_dir():
-        for path in sorted(CONFIG_DIR.glob("*.yaml")):
+        for path in sorted(
+            list(CONFIG_DIR.glob("*.yaml")) + list(CONFIG_DIR.glob("*.yml"))
+        ):
             configs.append(load_config(path, auth))
     return configs
 
