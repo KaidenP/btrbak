@@ -21,14 +21,16 @@ def test_add_remove_get(tmp_path):
 
 def test_committed_and_last():
     meta = manifest.default()
-    manifest.add_snapshot(meta, "p", {"id": "a", "type": "full", "uploads": []})
+    manifest.add_snapshot(meta, "p", {"id": "a", "type": "full", "uploads": [{"remote": "r", "status": "complete"}]})
     manifest.add_snapshot(
         meta,
         "p",
         {"id": "b", "type": "incr", "parent": "a", "uploads": [{"remote": "r", "status": "failed"}]},
     )
-    assert manifest.committed({"uploads": []})
-    assert not manifest.committed({"uploads": [{"status": "failed"}]})
+    assert manifest.committed({"type": "full", "uploads": [{"status": "complete"}]})
+    assert not manifest.committed({"type": "full", "uploads": []})
+    assert not manifest.committed({"type": "incr", "uploads": [{"status": "failed"}]})
+    assert manifest.committed({"type": "local", "uploads": []})
     assert manifest.last_committed(meta, "p")["id"] == "a"
     assert manifest.last_full_committed(meta, "p")["id"] == "a"
     assert manifest.children(meta, "p", "a")[0]["id"] == "b"

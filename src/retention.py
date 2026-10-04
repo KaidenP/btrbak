@@ -1,10 +1,6 @@
 """Dependency-preserving retention planning."""
 
-from manifest import snapshots
-
-
-def is_complete(snapshot: dict) -> bool:
-    return all(upload.get("status") == "complete" for upload in snapshot.get("uploads", []))
+from manifest import committed, snapshots
 
 
 def plan_prune(meta: dict, profile_name: str, keep: int, now_ts: int) -> list[str]:
@@ -30,7 +26,7 @@ def plan_prune(meta: dict, profile_name: str, keep: int, now_ts: int) -> list[st
             if snap["id"] in remaining
             and now_ts - snap.get("created", 0) >= keep
             and snap["id"] not in parents
-            and is_complete(snap)
+            and committed(snap)
         ]
         if not candidates:
             break

@@ -27,21 +27,31 @@ def _profile(name, full, incr, keep, remotes=None):
     )
 
 
-def _remote_meta():
-    return {"profiles": {"daily": {"snapshots": []}}}
+def _remote(sid, created, parent=None, status="complete"):
+    return {
+        "id": sid,
+        "created": created,
+        "type": "incr" if parent else "full",
+        "parent": parent,
+        "uploads": [{"remote": "r", "status": status}],
+    }
+
+
+def _local(sid, created):
+    return {"id": sid, "created": created, "type": "local", "parent": None, "uploads": []}
 
 
 def test_first_run_creates_full():
     profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
     cfg = _cfg({"daily": profile})
-    due, stype, parent = cli.compute_plan(cfg, profile, _remote_meta(), 5000)
+    due, stype, parent = cli.compute_plan(cfg, profile, {"profiles": {"daily": {"snapshots": []}}}, 5000)
     assert (due, stype, parent) == (True, "full", None)
 
 
 def test_full_due_after_window():
     profile = _profile("daily", 100, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
     cfg = _cfg({"daily": profile})
-    meta = {"profiles": {"daily": {"snapshots": [{"id": "f", "created": 1000, "type": "full", "parent": None, "uploads": []}]}}}
+    meta = {"profiles": {"daily": {"snapshots": [_remote("f", 1000)]}}}
     due, stype, parent = cli.compute_plan(cfg, profile, meta, 5000)
     assert (due, stype, parent) == (True, "full", None)
 
@@ -49,7 +59,7 @@ def test_full_due_after_window():
 def test_incremental_due():
     profile = _profile("daily", 7 * 86400, 100, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
     cfg = _cfg({"daily": profile})
-    meta = {"profiles": {"daily": {"snapshots": [{"id": "f", "created": 4000, "type": "full", "parent": None, "uploads": []}]}}}
+    meta = {"profiles": {"daily": {"snapshots": [_remote("f", 4000)]}}}
     due, stype, parent = cli.compute_plan(cfg, profile, meta, 5000)
     assert (due, stype, parent) == (True, "incr", "f")
 
@@ -57,7 +67,7 @@ def test_incremental_due():
 def test_nothing_due():
     profile = _profile("daily", 7 * 86400, 100, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
     cfg = _cfg({"daily": profile})
-    meta = {"profiles": {"daily": {"snapshots": [{"id": "f", "created": 4990, "type": "full", "parent": None, "uploads": []}]}}}
+    meta = {"profiles": {"daily": {"snapshots": [_remote("f", 4990)]}}}
     due, stype, parent = cli.compute_plan(cfg, profile, meta, 5000)
     assert (due, stype, parent) == (False, None, None)
 
@@ -65,7 +75,7 @@ def test_nothing_due():
 def test_force_creates_incremental_when_not_due():
     profile = _profile("daily", 7 * 86400, 100, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
     cfg = _cfg({"daily": profile})
-    meta = {"profiles": {"daily": {"snapshots": [{"id": "f", "created": 4990, "type": "full", "parent": None, "uploads": []}]}}}
+    meta = {"profiles": {"daily": {"snapshots": [_remote("f", 4990)]}}}
     due, stype, parent = cli.compute_plan(cfg, profile, meta, 5000, force=True)
     assert (due, stype, parent) == (True, "incr", "f")
 
@@ -73,7 +83,7 @@ def test_force_creates_incremental_when_not_due():
 def test_full_flag_forces_full():
     profile = _profile("daily", 7 * 86400, 100, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
     cfg = _cfg({"daily": profile})
-    meta = {"profiles": {"daily": {"snapshots": [{"id": "f", "created": 4990, "type": "full", "parent": None, "uploads": []}]}}}
+    meta = {"profiles": {"daily": {"snapshots": [_remote("f", 4990)]}}}
     due, stype, parent = cli.compute_plan(cfg, profile, meta, 5000, full=True)
     assert (due, stype, parent) == (True, "full", None)
 
@@ -81,9 +91,13 @@ def test_full_flag_forces_full():
 def test_local_only_due_and_type():
     profile = _profile("local", 86400, -1, 14 * 86400)
     cfg = _cfg({"local": profile})
-    assert cli.compute_plan(cfg, profile, _remote_meta(), 5000) == (True, "local", None)
+    assert cli.compute_plan(cfg, profile, {"profiles": {"local": {"snapshots": []}}}, 5000) == (
+        True,
+        "local",
+        None,
+    )
 
-    meta = {"profiles": {"local": {"snapshots": [{"id": "a", "created": 4000, "type": "local", "parent": None, "uploads": []}]}}}
+    meta = {"profiles": {"local": {"snapshots": [_local("a", 4000)]}}}
     assert cli.compute_plan(cfg, profile, meta, 5000) == (False, None, None)
 
 

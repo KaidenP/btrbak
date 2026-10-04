@@ -26,3 +26,7 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 ```
 python -m pytest
 ```
+
+End-to-end tests against a real btrfs filesystem (loopback mount) are planned
+but not wired up yet; the current suite covers parsing, config, retention,
+manifest, remote mapping, and the compression codec.

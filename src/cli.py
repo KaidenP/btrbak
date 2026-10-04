@@ -136,9 +136,11 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> None:
         for pname, profile in cfg.profiles.items():
             if profile_filter and pname != profile_filter:
                 continue
-            run_profile(cfg, profile, meta, by_profile[pname], force, full)
-            manifest.save(meta_path, meta)
-            push_manifest(meta_path, by_profile)
+            try:
+                run_profile(cfg, profile, meta, by_profile[pname], force, full)
+            finally:
+                manifest.save(meta_path, meta)
+                _push_manifest_best_effort(meta_path, by_profile)
 
         prune(cfg, meta, by_profile)
         manifest.save(meta_path, meta)
@@ -342,6 +344,13 @@ def push_manifest(meta_path, by_profile) -> None:
                 continue
             seen.add(spec.id)
             remote.write(meta_path, "meta.yaml")
+
+
+def _push_manifest_best_effort(meta_path, by_profile) -> None:
+    try:
+        push_manifest(meta_path, by_profile)
+    except Exception as exc:  # noqa: BLE001 - keep local state authoritative
+        print(f"warning: failed to push manifest to remote: {exc}", file=sys.stderr)
 
 
 def ensure_profile_meta(meta, cfg) -> None:

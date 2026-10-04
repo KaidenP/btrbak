@@ -20,6 +20,18 @@ def _use_age(encryption) -> bool:
     return bool(encryption and encryption.get("algorithm") == "age")
 
 
+def compress_file(src, dst, preset: int = 6) -> None:
+    with open(src, "rb") as source, lzma.open(
+        dst, "wb", format=lzma.FORMAT_XZ, preset=preset
+    ) as sink:
+        shutil.copyfileobj(source, sink)
+
+
+def decompress_file(src, dst) -> None:
+    with lzma.open(src, "rb") as source, open(dst, "wb") as sink:
+        shutil.copyfileobj(source, sink)
+
+
 def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None) -> None:
     """Send a snapshot to *out_path* as a compressed/encrypted stream file.
 
@@ -54,10 +66,7 @@ def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None)
             level = int(compression.get("level", 6))
             compressed = work / (out_path.name + ".xz")
             intermediates.append(compressed)
-            with open(current, "rb") as source, lzma.open(
-                compressed, "wb", format=lzma.FORMAT_XZ, preset=level
-            ) as sink:
-                shutil.copyfileobj(source, sink)
+            compress_file(current, compressed, level)
             current = compressed
 
         if use_age:
@@ -95,8 +104,7 @@ def restore_stream(send_file, target, compression=None, encryption=None) -> None
         if use_xz:
             decompressed = work / (send_file.name + ".decx")
             intermediates.append(decompressed)
-            with lzma.open(current, "rb") as source, open(decompressed, "wb") as sink:
-                shutil.copyfileobj(source, sink)
+            decompress_file(current, decompressed)
             current = decompressed
 
         with open(current, "rb") as handle:

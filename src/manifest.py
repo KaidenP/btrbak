@@ -60,8 +60,10 @@ def remove_snapshot(meta: dict, name: str, snapshot_id: str) -> None:
 
 
 def committed(snapshot: dict) -> bool:
+    if snapshot.get("type") == "local":
+        return True
     uploads = snapshot.get("uploads", [])
-    return all(upload.get("status") == "complete" for upload in uploads)
+    return bool(uploads) and all(upload.get("status") == "complete" for upload in uploads)
 
 
 def last_committed(meta: dict, name: str) -> dict | None:
