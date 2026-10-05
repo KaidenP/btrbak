@@ -17,8 +17,13 @@ def load(path) -> dict:
     path = Path(path)
     if not path.exists():
         return default()
-    with open(path) as handle:
-        data = yaml.safe_load(handle) or {}
+    try:
+        with open(path) as handle:
+            data = yaml.safe_load(handle) or {}
+    except yaml.YAMLError as exc:
+        raise BtrbakError(f"invalid meta.yaml: {exc}")
+    if not isinstance(data, dict):
+        raise BtrbakError("meta.yaml must be a mapping")
     if data.get("version") != VERSION:
         raise BtrbakError(f"unsupported meta.yaml version: {data.get('version')!r}")
     data.setdefault("profiles", {})

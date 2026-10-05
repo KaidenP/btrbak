@@ -7,7 +7,7 @@ live in ``/etc/btrbak/auth.yaml``.
 import hashlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
@@ -60,17 +60,30 @@ def load_auth(path=AUTH_PATH) -> dict:
     path = Path(path)
     if not path.exists():
         return {}
-    with open(path) as handle:
-        data = yaml.safe_load(handle) or {}
+    try:
+        with open(path) as handle:
+            data = yaml.safe_load(handle) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"invalid YAML in {path}: {exc}")
     if not isinstance(data, dict):
         raise ConfigError(f"auth file must be a mapping: {path}")
     return data
 
 
+def _parse_tmpdir(value) -> Path:
+    """Return the configured tmpdir, falling back to the default when unset/empty."""
+    if not value:
+        return DEFAULT_TMPDIR
+    return Path(str(value)).expanduser()
+
+
 def load_config(path, auth: dict) -> Config:
     path = Path(path)
-    with open(path) as handle:
-        data = yaml.safe_load(handle)
+    try:
+        with open(path) as handle:
+            data = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"invalid YAML in {path}: {exc}")
     if not isinstance(data, dict):
         raise ConfigError(f"config must be a mapping: {path}")
 
@@ -94,7 +107,7 @@ def load_config(path, auth: dict) -> Config:
         path=path,
         src=Path(src).expanduser(),
         dest=Path(dest).expanduser(),
-        tmpdir=Path(data.get("tmpdir", DEFAULT_TMPDIR)).expanduser(),
+        tmpdir=_parse_tmpdir(data.get("tmpdir")),
         compression=_normalize_compression(data.get("compression"), path),
         encryption=_normalize_encryption(data.get("encryption"), path),
         profiles=profiles,
@@ -103,20 +116,39 @@ def load_config(path, auth: dict) -> Config:
 
 def discover_configs(subvol=None) -> list[Config]:
     auth = load_auth()
-    configs = []
     if subvol:
-        path = CONFIG_DIR / f"{subvol}.yaml"
-        if not path.exists():
-            raise ConfigError(f"no config file: {path}")
-        configs.append(load_config(path, auth))
-        return configs
+        return [load_config(config_path_for_subvol(subvol), auth)]
 
+    configs = []
     if CONFIG_DIR.is_dir():
         for path in sorted(
             list(CONFIG_DIR.glob("*.yaml")) + list(CONFIG_DIR.glob("*.yml"))
         ):
             configs.append(load_config(path, auth))
     return configs
+
+
+def config_path_for_subvol(subvol) -> Path:
+    """Resolve a SUBVOL selector to a config file (``.yaml`` or ``.yml``)."""
+    for ext in (".yaml", ".yml"):
+        path = CONFIG_DIR / f"{subvol}{ext}"
+        if path.exists():
+            return path
+    raise ConfigError(f"no config file for subvol {subvol!r} in {CONFIG_DIR}")
+
+
+def filter_profiles(config: Config, name: str | None) -> Config:
+    """Return *config* restricted to profile *name* (unchanged when *name* is None)."""
+    if not name:
+        return config
+    return replace(
+        config,
+        profiles={
+            pname: profile
+            for pname, profile in config.profiles.items()
+            if pname == name
+        },
+    )
 
 
 def _parse_profile(name, praw, auth, path) -> Profile:
@@ -194,7 +226,7 @@ def _normalize_compression(compression, path) -> dict | None:
     if algo != "xz":
         raise ConfigError(f"{path}: unsupported compression algorithm {algo!r} (v1: xz)")
     level = compression.get("level", 6)
-    if not isinstance(level, int) or not 0 <= level <= 9:
+    if isinstance(level, bool) or not isinstance(level, int) or not 0 <= level <= 9:
         raise ConfigError(f"{path}: compression level must be an integer 0-9")
     return {"algorithm": "xz", "level": level}
 
@@ -250,6 +282,8 @@ def validate(config: Config, check_remotes=True):
             )
 
     _check_creatable(config.tmpdir, "tmpdir", errors)
+    _check_creatable(config.dest, "dest", errors)
+    _check_permissions(AUTH_PATH, "auth.yaml", warnings)
 
     for profile in config.profiles.values():
         if not timespan.is_never(profile.freq_incr) and profile.keep < profile.freq_incr:
@@ -268,6 +302,10 @@ def validate(config: Config, check_remotes=True):
     if config.encryption and config.encryption["algorithm"] == "age":
         if not which("age"):
             errors.append("encryption is enabled but the 'age' binary was not found")
+        if config.encryption["identity"]:
+            _check_permissions(
+                config.encryption["identity"], "age identity file", warnings
+            )
 
     return errors, warnings
 
@@ -289,3 +327,13 @@ def _check_creatable(path: Path, label: str, errors: list[str]) -> None:
         parent = _nearest_existing(path)
         if parent is None or not os.access(parent, os.W_OK):
             errors.append(f"{label} is not creatable: {path}")
+
+
+def _check_permissions(path, label: str, warnings: list[str]) -> None:
+    """Warn when a sensitive file is not ``0600``."""
+    path = Path(path)
+    if not path.exists():
+        return
+    mode = path.stat().st_mode & 0o777
+    if mode != 0o600:
+        warnings.append(f"{label} should be 0600 but is {oct(mode)[2:]}: {path}")

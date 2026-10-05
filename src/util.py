@@ -5,12 +5,11 @@ import datetime
 import fcntl
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-
-BTRFS_MAGIC = 0x9123683E
 
 
 class BtrbakError(Exception):
@@ -89,14 +88,77 @@ def atomic_write_text(path, text: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
+        _fsync_dir(path.parent)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
 
 
+def _fsync_dir(path: Path) -> None:
+    """Best-effort fsync of a directory after a rename."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def btrfs_fsid(path) -> str | None:
+    """Return the btrfs filesystem UUID for *path*, or ``None``.
+
+    btrfs subvolumes report distinct ``st_dev`` values, so the filesystem
+    UUID of the containing mount point is the reliable identifier.
+    """
+    try:
+        mount = _mount_point(Path(path))
+        proc = subprocess.run(
+            ["btrfs", "filesystem", "show", str(mount)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    text = proc.stdout.decode("utf-8", "replace")
+    match = re.search(r"\buuid:\s*([0-9a-fA-F-]+)", text)
+    return match.group(1).lower() if match else None
+
+
+def _mount_point(path: Path) -> Path:
+    """Return the real mount point containing *path*.
+
+    ``os.path.ismount`` is unusable here: btrfs subvolumes report distinct
+    ``st_dev`` values and therefore appear to be mount points themselves.
+    Parse ``/proc/self/mounts`` so we resolve to the actual filesystem mount.
+    """
+    path = Path(path).resolve()
+    best = None
+    try:
+        with open("/proc/self/mounts") as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                mount = Path(parts[1].replace("\\040", " "))
+                if path == mount or mount in path.parents:
+                    if best is None or len(mount.parts) > len(best.parts):
+                        best = mount
+    except OSError:
+        return path
+    return best or path
+
+
 def same_device(a, b) -> bool:
-    """Return True when *a* and *b* live on the same filesystem (st_dev)."""
-    return os.stat(a).st_dev == os.stat(b).st_dev
+    """Return True when *a* and *b* live on the same btrfs filesystem."""
+    fsid_a = btrfs_fsid(a)
+    fsid_b = btrfs_fsid(b)
+    return fsid_a is not None and fsid_a == fsid_b
 
 
 def is_nested(inner, outer) -> bool:
@@ -109,10 +171,7 @@ def is_nested(inner, outer) -> bool:
 
 def is_btrfs(path) -> bool:
     """Return True when *path* sits on a btrfs filesystem."""
-    try:
-        return os.statvfs(path).f_type == BTRFS_MAGIC
-    except OSError:
-        return False
+    return btrfs_fsid(path) is not None
 
 
 def is_subvolume(path) -> bool:

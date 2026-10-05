@@ -18,12 +18,12 @@ from remotes.base import RemoteError, RemoteNotFoundError
 
 
 def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
     if os.geteuid() != 0:
         print("btrbak: must be run as root", file=sys.stderr)
         return 1
 
-    parser = build_parser()
-    args = parser.parse_args(argv)
     try:
         return args.func(args)
     except config_mod.ConfigError as exc:
@@ -93,13 +93,14 @@ def cmd_run(args) -> int:
 
 
 def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> None:
-    errors, warnings = config_mod.validate(cfg)
+    selected = config_mod.filter_profiles(cfg, profile_filter)
+    errors, warnings = config_mod.validate(selected, check_remotes=not dry_run)
     if errors:
         raise config_mod.ConfigError("\n".join(errors))
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
 
-    if config_mod.is_nested(cfg.dest, cfg.src):
+    if config_mod.is_nested(selected.dest, selected.src):
         if dry_run:
             print("warning: dest is nested inside src; would wait 5s", file=sys.stderr)
         else:
@@ -110,39 +111,37 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> None:
             time.sleep(5)
 
     if dry_run:
-        meta = manifest.load(cfg.dest / "meta.yaml")
-        for pname, profile in cfg.profiles.items():
-            if profile_filter and pname != profile_filter:
-                continue
-            due, stype, parent = compute_plan(cfg, profile, meta, util.now(), force, full)
+        meta = manifest.load(selected.dest / "meta.yaml")
+        for pname, profile in selected.profiles.items():
+            due, stype, parent = compute_plan(
+                selected, profile, meta, util.now(), force, full
+            )
             if due:
                 print(
-                    f"[dry-run] {cfg.name}/{pname}: would create {stype} snapshot"
+                    f"[dry-run] {selected.name}/{pname}: would create {stype} snapshot"
                     f" (parent={parent or '-'})"
                 )
             else:
-                print(f"[dry-run] {cfg.name}/{pname}: nothing due")
+                print(f"[dry-run] {selected.name}/{pname}: nothing due")
         return
 
-    cfg.dest.mkdir(parents=True, exist_ok=True)
-    with util.exclusive_lock(cfg.dest / ".btrbak.lock"):
-        clean_tmpdir(cfg)
-        meta_path = cfg.dest / "meta.yaml"
+    selected.dest.mkdir(parents=True, exist_ok=True)
+    with util.exclusive_lock(selected.dest / ".btrbak.lock"):
+        clean_tmpdir(selected)
+        meta_path = selected.dest / "meta.yaml"
         meta = manifest.load(meta_path)
-        ensure_profile_meta(meta, cfg)
-        _all_remotes, by_profile = collect_remotes(cfg)
-        sync_settings(cfg, _all_remotes, force_config)
+        ensure_profile_meta(meta, selected)
+        _all_remotes, by_profile = collect_remotes(selected)
+        sync_settings(selected, _all_remotes, force_config)
 
-        for pname, profile in cfg.profiles.items():
-            if profile_filter and pname != profile_filter:
-                continue
+        for pname, profile in selected.profiles.items():
             try:
-                run_profile(cfg, profile, meta, by_profile[pname], force, full)
+                run_profile(selected, profile, meta, by_profile[pname], force, full)
             finally:
                 manifest.save(meta_path, meta)
                 _push_manifest_best_effort(meta_path, by_profile)
 
-        prune(cfg, meta, by_profile)
+        prune(selected, meta, by_profile)
         manifest.save(meta_path, meta)
         push_manifest(meta_path, by_profile)
 
@@ -192,7 +191,9 @@ def compute_plan(cfg, profile, meta, now_ts, force=False, full=False):
 
 def run_profile(cfg, profile, meta, remotes, force, full) -> None:
     pname = profile.name
+    current_ids = {spec.id for spec, _ in remotes}
     for snap in manifest.snapshots(meta, pname):
+        reconcile_uploads(snap, current_ids)
         if not manifest.committed(snap):
             retry_upload(cfg, profile, snap, remotes)
 
@@ -211,6 +212,8 @@ def run_profile(cfg, profile, meta, remotes, force, full) -> None:
         "created": now_ts,
         "type": stype,
         "parent": parent_id,
+        "compression": cfg.compression if remotes else None,
+        "encryption": cfg.encryption if remotes else None,
         "file": f"{pname}/{snap_id}.send" if remotes else None,
         "sha256": None,
         "size": None,
@@ -226,20 +229,24 @@ def perform_send_upload(cfg, profile, entry, snap_path, parent_id, remotes) -> N
     pname = profile.name
     staged = cfg.tmpdir / cfg.name / pname / f"{entry['id']}.send"
     staged.parent.mkdir(parents=True, exist_ok=True)
-    parent_path = cfg.dest / pname / parent_id if parent_id else None
-    send.send_snapshot(snap_path, parent_path, staged, cfg.compression, cfg.encryption)
-    entry["sha256"] = util.sha256_file(staged)
-    entry["size"] = staged.stat().st_size
+    try:
+        parent_path = cfg.dest / pname / parent_id if parent_id else None
+        send.send_snapshot(
+            snap_path, parent_path, staged, cfg.compression, cfg.encryption
+        )
+        entry["sha256"] = util.sha256_file(staged)
+        entry["size"] = staged.stat().st_size
 
-    for spec, remote in remotes:
-        status = "complete"
-        try:
-            remote.write(staged, entry["file"])
-        except Exception as exc:  # noqa: BLE001 - record per-remote failure
-            print(f"upload to {spec.id} failed: {exc}", file=sys.stderr)
-            status = "failed"
-        entry["uploads"].append({"remote": spec.id, "status": status})
-    staged.unlink(missing_ok=True)
+        for spec, remote in remotes:
+            status = "complete"
+            try:
+                remote.write(staged, entry["file"])
+            except Exception as exc:  # noqa: BLE001 - record per-remote failure
+                print(f"upload to {spec.id} failed: {exc}", file=sys.stderr)
+                status = "failed"
+            entry["uploads"].append({"remote": spec.id, "status": status})
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def retry_upload(cfg, profile, snap, remotes) -> None:
@@ -253,27 +260,52 @@ def retry_upload(cfg, profile, snap, remotes) -> None:
 
     staged = cfg.tmpdir / cfg.name / pname / f"{snap['id']}.send"
     staged.parent.mkdir(parents=True, exist_ok=True)
-    parent_path = cfg.dest / pname / snap["parent"] if snap.get("parent") else None
-    send.send_snapshot(snap_path, parent_path, staged, cfg.compression, cfg.encryption)
-    snap["sha256"] = util.sha256_file(staged)
-    snap["size"] = staged.stat().st_size
+    try:
+        parent_path = cfg.dest / pname / snap["parent"] if snap.get("parent") else None
+        send.send_snapshot(
+            snap_path, parent_path, staged, cfg.compression, cfg.encryption
+        )
+        snap["sha256"] = util.sha256_file(staged)
+        snap["size"] = staged.stat().st_size
+        snap["compression"] = cfg.compression
+        snap["encryption"] = cfg.encryption
 
-    uploads = snap.setdefault("uploads", [])
-    for spec, remote in remotes:
-        existing = next((u for u in uploads if u["remote"] == spec.id), None)
-        if existing and existing["status"] == "complete":
-            continue
-        status = "complete"
-        try:
-            remote.write(staged, snap["file"])
-        except Exception as exc:  # noqa: BLE001
-            print(f"upload to {spec.id} failed: {exc}", file=sys.stderr)
-            status = "failed"
-        if existing:
-            existing["status"] = status
-        else:
-            uploads.append({"remote": spec.id, "status": status})
-    staged.unlink(missing_ok=True)
+        uploads = snap.setdefault("uploads", [])
+        for spec, remote in remotes:
+            existing = next((u for u in uploads if u["remote"] == spec.id), None)
+            if existing and existing["status"] == "complete":
+                continue
+            status = "complete"
+            try:
+                remote.write(staged, snap["file"])
+            except Exception as exc:  # noqa: BLE001
+                print(f"upload to {spec.id} failed: {exc}", file=sys.stderr)
+                status = "failed"
+            if existing:
+                existing["status"] = status
+            else:
+                uploads.append({"remote": spec.id, "status": status})
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def reconcile_uploads(snap, current_ids) -> None:
+    """Drop upload records for remotes no longer configured.
+
+    Removing a remote must not strand a snapshot in an uncommitted state;
+    prune stale upload records so the snapshot can be retried against (or
+    committed by) the remotes that remain.
+    """
+    uploads = snap.get("uploads", [])
+    seen = set()
+    kept = []
+    for upload in uploads:
+        remote_id = upload.get("remote")
+        if remote_id in current_ids and remote_id not in seen:
+            seen.add(remote_id)
+            kept.append(upload)
+    if kept != uploads:
+        snap["uploads"] = kept
 
 
 def prune(cfg, meta, by_profile) -> None:
@@ -357,8 +389,6 @@ def ensure_profile_meta(meta, cfg) -> None:
     for pname in cfg.profiles:
         entry = manifest.profile(meta, pname)
         entry.setdefault("src", str(cfg.src))
-        entry.setdefault("compression", cfg.compression)
-        entry.setdefault("encryption", cfg.encryption)
         entry.setdefault("snapshots", [])
 
 
@@ -366,8 +396,8 @@ def unique_snapshot_id(base, profile_dir) -> str:
     candidate = base
     index = 1
     while (profile_dir / candidate).exists():
-        index += 1
         candidate = f"{base}-{index}"
+        index += 1
     return candidate
 
 
@@ -430,8 +460,9 @@ def cmd_list(args) -> int:
 
 def cmd_verify(args) -> int:
     configs = config_mod.discover_configs(args.subvol)
-    failures = 0
+    total_failures = 0
     for cfg in configs:
+        failures = 0
         meta = manifest.load(cfg.dest / "meta.yaml")
         _all_remotes, by_profile = collect_remotes(cfg)
         for pname in cfg.profiles:
@@ -500,14 +531,13 @@ def cmd_verify(args) -> int:
                         tmp.unlink(missing_ok=True)
         if failures == 0:
             print(f"{cfg.name}: ok")
-    return 1 if failures else 0
+        total_failures += failures
+    return 1 if total_failures else 0
 
 
 def cmd_restore(args) -> int:
     auth = config_mod.load_auth()
-    path = config_mod.CONFIG_DIR / f"{args.subvol}.yaml"
-    if not path.exists():
-        raise config_mod.ConfigError(f"no config file: {path}")
+    path = config_mod.config_path_for_subvol(args.subvol)
     cfg = config_mod.load_config(path, auth)
     restore_mod.run_restore(cfg, args.profile, args.snapshot_id, args.target)
     return 0

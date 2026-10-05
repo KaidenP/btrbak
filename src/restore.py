@@ -34,6 +34,19 @@ def pick_remote(snapshot: dict, remote_map: dict):
     return None
 
 
+def codec_for_snapshot(snap: dict, profile_meta: dict) -> tuple:
+    """Return the ``(compression, encryption)`` settings for a snapshot.
+
+    Prefers the snapshot's own recorded settings and falls back to the
+    profile-level values for manifests written before per-snapshot codec
+    storage was introduced.
+    """
+    return (
+        snap.get("compression", profile_meta.get("compression")),
+        snap.get("encryption", profile_meta.get("encryption")),
+    )
+
+
 def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
@@ -45,8 +58,6 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
 
     chain = build_chain(meta, profile_name, snapshot_id)
     profile_meta = manifest.profile(meta, profile_name)
-    compression = profile_meta.get("compression")
-    encryption = profile_meta.get("encryption")
     remote_map = {
         spec.id: create_remote(spec) for spec in config.profiles[profile_name].remotes
     }
@@ -57,15 +68,18 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
         if remote is None:
             raise BtrbakError(f"no complete remote upload for snapshot {sid}")
 
+        compression, encryption = codec_for_snapshot(snap, profile_meta)
         tmpfile = tmpdir / f"{sid}.send"
-        remote.read(snap["file"], tmpfile)
-        if sha256_file(tmpfile) != snap.get("sha256"):
-            raise BtrbakError(f"checksum mismatch for snapshot {sid}")
-        if tmpfile.stat().st_size != snap.get("size"):
-            raise BtrbakError(f"size mismatch for snapshot {sid}")
+        try:
+            remote.read(snap["file"], tmpfile)
+            if sha256_file(tmpfile) != snap.get("sha256"):
+                raise BtrbakError(f"checksum mismatch for snapshot {sid}")
+            if tmpfile.stat().st_size != snap.get("size"):
+                raise BtrbakError(f"size mismatch for snapshot {sid}")
 
-        send.restore_stream(tmpfile, target, compression, encryption)
-        tmpfile.unlink(missing_ok=True)
+            send.restore_stream(tmpfile, target, compression, encryption)
+        finally:
+            tmpfile.unlink(missing_ok=True)
 
 
 def run_restore(config, profile_name, snapshot_id, target) -> None:
@@ -89,10 +103,12 @@ def load_meta_for_restore(config, profile_name, tmpdir) -> dict:
 
     for spec in profile.remotes:
         remote = create_remote(spec)
+        tmp = tmpdir / "meta.yaml"
         try:
-            tmp = tmpdir / "meta.yaml"
             remote.read("meta.yaml", tmp)
             return manifest.load(tmp)
         except RemoteNotFoundError:
             continue
+        finally:
+            tmp.unlink(missing_ok=True)
     raise BtrbakError("could not download meta.yaml from any remote")
