@@ -106,4 +106,78 @@ def test_unique_snapshot_id(tmp_path):
     profile_dir.mkdir()
     assert cli.unique_snapshot_id("20251004T000000Z", profile_dir) == "20251004T000000Z"
     (profile_dir / "20251004T000000Z").mkdir()
-    assert cli.unique_snapshot_id("20251004T000000Z", profile_dir) == "20251004T000000Z-2"
+    assert cli.unique_snapshot_id("20251004T000000Z", profile_dir) == "20251004T000000Z-1"
+
+
+def test_run_profile_records_codec_per_snapshot(tmp_path, monkeypatch):
+    profile = _profile(
+        "daily",
+        7 * 86400,
+        86400,
+        30 * 86400,
+        [RemoteSpec("r", "dir", {"path": str(tmp_path / "remote")})],
+    )
+    cfg = _cfg({"daily": profile})
+    cfg.dest = tmp_path / "snapshots"
+    cfg.tmpdir = tmp_path / "tmp"
+    cfg.compression = {"algorithm": "xz", "level": 6}
+    cfg.encryption = {"algorithm": "age", "recipients": ["age1abc"], "identity": "/key"}
+
+    sent = {}
+
+    def fake_send(snapshot, parent, out_path, compression=None, encryption=None):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b"data")
+        sent["compression"] = compression
+        sent["encryption"] = encryption
+
+    monkeypatch.setattr(cli.snapshot, "create_ro_snapshot", lambda src, dest: None)
+    monkeypatch.setattr(cli.send, "send_snapshot", fake_send)
+    monkeypatch.setattr(cli.util, "sha256_file", lambda path: "abc123")
+    monkeypatch.setattr(cli.util, "now", lambda: 5000)
+    monkeypatch.setattr(cli.util, "snapshot_id", lambda ts=None: "20250101T000000Z")
+
+    class FakeRemote:
+        def write(self, local_src, remote_path):
+            pass
+
+    remotes = [(RemoteSpec("r", "dir", {"path": str(tmp_path / "remote")}), FakeRemote())]
+    meta = {"profiles": {}}
+
+    cli.run_profile(cfg, profile, meta, remotes, force=False, full=False)
+
+    snaps = meta["profiles"]["daily"]["snapshots"]
+    assert len(snaps) == 1
+    assert snaps[0]["compression"] == {"algorithm": "xz", "level": 6}
+    assert snaps[0]["encryption"] == {
+        "algorithm": "age",
+        "recipients": ["age1abc"],
+        "identity": "/key",
+    }
+    assert sent["compression"] == {"algorithm": "xz", "level": 6}
+    assert sent["encryption"] == cfg.encryption
+
+
+def test_reconcile_uploads_drops_removed_remote():
+    snap = {"uploads": [
+        {"remote": "kept", "status": "complete"},
+        {"remote": "removed", "status": "failed"},
+    ]}
+    cli.reconcile_uploads(snap, {"kept"})
+    assert snap["uploads"] == [{"remote": "kept", "status": "complete"}]
+
+
+def test_reconcile_uploads_dedupes():
+    snap = {"uploads": [
+        {"remote": "r", "status": "failed"},
+        {"remote": "r", "status": "complete"},
+    ]}
+    cli.reconcile_uploads(snap, {"r"})
+    assert snap["uploads"] == [{"remote": "r", "status": "failed"}]
+
+
+def test_reconcile_uploads_noop_when_current():
+    uploads = [{"remote": "r", "status": "complete"}]
+    snap = {"uploads": list(uploads)}
+    cli.reconcile_uploads(snap, {"r"})
+    assert snap["uploads"] == uploads

@@ -162,3 +162,91 @@ def test_missing_src_or_dest(tmp_path):
     _write(cfg_file, {"profiles": {"daily": {"freq": {"full": "1d", "incr": "1d"}, "keep": "7d"}}})
     with pytest.raises(config.ConfigError):
         config.load_config(cfg_file, {})
+
+
+def test_invalid_yaml_raises_config_error(tmp_path):
+    cfg_file = tmp_path / "root.yaml"
+    cfg_file.write_text("src: [unclosed\n  foo: bar")
+    with pytest.raises(config.ConfigError):
+        config.load_config(cfg_file, {})
+
+
+def test_compression_bool_level_rejected(tmp_path):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": "/mnt/data",
+            "dest": "/mnt/data/.snapshots",
+            "compression": {"algorithm": "xz", "level": True},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        },
+    )
+    with pytest.raises(config.ConfigError):
+        config.load_config(cfg_file, {})
+
+
+def test_filter_profiles(tmp_path):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": "/mnt/data",
+            "dest": "/mnt/data/.snapshots",
+            "profiles": {
+                "daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"},
+                "weekly": {"freq": {"full": "30d", "incr": "7d"}, "keep": "90d"},
+            },
+        },
+    )
+    cfg = config.load_config(cfg_file, {})
+    assert set(config.filter_profiles(cfg, "daily").profiles) == {"daily"}
+    assert set(config.filter_profiles(cfg, None).profiles) == {"daily", "weekly"}
+
+
+def test_tmpdir_null_uses_default(tmp_path):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": "/mnt/data",
+            "dest": "/mnt/data/.snapshots",
+            "tmpdir": None,
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        },
+    )
+    cfg = config.load_config(cfg_file, {})
+    assert cfg.tmpdir == config.DEFAULT_TMPDIR
+
+
+def test_tmpdir_missing_uses_default(tmp_path):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": "/mnt/data",
+            "dest": "/mnt/data/.snapshots",
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        },
+    )
+    cfg = config.load_config(cfg_file, {})
+    assert cfg.tmpdir == config.DEFAULT_TMPDIR
+
+
+def test_config_path_for_subvol_prefers_yaml(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    (tmp_path / "root.yaml").write_text("src: /x\n")
+    (tmp_path / "root.yml").write_text("src: /x\n")
+    assert config.config_path_for_subvol("root") == tmp_path / "root.yaml"
+
+
+def test_config_path_for_subvol_falls_back_to_yml(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    (tmp_path / "root.yml").write_text("src: /x\n")
+    assert config.config_path_for_subvol("root") == tmp_path / "root.yml"
+
+
+def test_config_path_for_subvol_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    with pytest.raises(config.ConfigError):
+        config.config_path_for_subvol("nope")

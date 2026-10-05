@@ -1,3 +1,5 @@
+import pytest
+
 import manifest
 
 
@@ -33,4 +35,17 @@ def test_committed_and_last():
     assert manifest.committed({"type": "local", "uploads": []})
     assert manifest.last_committed(meta, "p")["id"] == "a"
     assert manifest.last_full_committed(meta, "p")["id"] == "a"
+
+
+def test_children():
+    meta = manifest.default()
+    manifest.add_snapshot(meta, "p", {"id": "a", "type": "full"})
+    manifest.add_snapshot(meta, "p", {"id": "b", "type": "incr", "parent": "a"})
     assert manifest.children(meta, "p", "a")[0]["id"] == "b"
+
+
+def test_invalid_yaml_raises(tmp_path):
+    path = tmp_path / "meta.yaml"
+    path.write_text("version: [unclosed\n  profiles: {}")
+    with pytest.raises(manifest.BtrbakError):
+        manifest.load(path)
