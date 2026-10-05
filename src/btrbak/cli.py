@@ -687,24 +687,39 @@ def clean_tmpdir(cfg, max_age=86400) -> None:
                 pass
 
 
-def _snapshot_depth(meta, pname, snap, cache, seen=None) -> int:
-    """Return the dependency depth of *snap* (0 for a root full backup)."""
-    if seen is None:
-        seen = set()
-    sid = snap.get("id")
-    if sid in cache:
-        return cache[sid]
-    if sid in seen:
-        return 0
-    seen.add(sid)
-    depth = 0
-    parent_id = snap.get("parent")
-    if parent_id:
-        parent = manifest.get_snapshot(meta, pname, parent_id)
-        if parent is not None:
-            depth = _snapshot_depth(meta, pname, parent, cache, seen) + 1
-    cache[sid] = depth
-    return depth
+def _snapshot_depths(meta, pname) -> dict:
+    """Return ``{snapshot id: dependency depth}`` for every snapshot in *pname*.
+
+    Depth 0 is a chain root; each parent link adds one. The walk is iterative:
+    a chain is only bounded by retention in practice, and a recursive version
+    both overflowed the stack on long chains and re-scanned the snapshot list
+    for every level (``get_snapshot`` is a linear lookup). Snapshots whose
+    parent is missing or cyclic settle at the depth reached, which keeps a
+    hand-edited manifest from taking `list` down with a traceback.
+    """
+    snaps = [snap for snap in manifest.snapshots(meta, pname) if snap.get("id")]
+    parents = {snap["id"]: snap.get("parent") for snap in snaps}
+    depths: dict = {}
+    for snap in snaps:
+        sid = snap["id"]
+        if sid in depths:
+            continue
+        # Walk up to the nearest ancestor of known depth, recording the way
+        # back down; this keeps every snapshot O(chain length) in total
+        # instead of re-walking a shared prefix.
+        chain, seen, cursor = [], set(), sid
+        while cursor not in depths and cursor not in seen:
+            seen.add(cursor)
+            chain.append(cursor)
+            parent = parents.get(cursor)
+            if parent not in parents:
+                break
+            cursor = parent
+        base = depths.get(cursor, -1)
+        for node in reversed(chain):
+            base += 1
+            depths[node] = base
+    return depths
 
 
 # --- other commands --------------------------------------------------------
@@ -749,9 +764,9 @@ def cmd_list(args) -> int:
         for pname in selected.profiles:
             snaps = manifest.snapshots(meta, pname)
             print(f"{cfg.name}/{pname}:" + (f" ({len(snaps)} snapshots)" if snaps else ""))
-            depth_cache = {}
+            depths = _snapshot_depths(meta, pname)
             for snap in snaps:
-                depth = _snapshot_depth(meta, pname, snap, depth_cache)
+                depth = depths.get(snap.get("id"), 0)
                 age = util.now() - manifest.created(snap)
                 uploads = ",".join(
                     f"{u.get('remote') or '?'}={u.get('status') or '?'}"

@@ -1010,6 +1010,59 @@ def test_cmd_list_tolerates_non_numeric_created(tmp_path, monkeypatch, capsys):
     assert "s1" in capsys.readouterr().out
 
 
+# --- snapshot dependency depth ----------------------------------------------
+
+
+def _depth_meta(snapshots):
+    return {"version": 1, "profiles": {"daily": {"snapshots": snapshots}}}
+
+
+def _linear_chain(length):
+    snaps = [_remote("s0", 0)]
+    for i in range(1, length):
+        snaps.append(_remote(f"s{i}", i, parent=f"s{i - 1}"))
+    return snaps
+
+
+def test_snapshot_depths_chain():
+    depths = cli._snapshot_depths(_depth_meta(_linear_chain(5)), "daily")
+    assert depths == {f"s{i}": i for i in range(5)}
+
+
+def test_snapshot_depths_are_order_independent():
+    """A newest-first manifest is what a hand-edited or re-sorted file looks like."""
+    snaps = _linear_chain(5)
+    assert cli._snapshot_depths(_depth_meta(list(reversed(snaps))), "daily") == {
+        f"s{i}": i for i in range(5)
+    }
+
+
+def test_snapshot_depths_survive_a_very_long_chain():
+    """A recursive walk overflowed the stack here; depth is now computed iteratively."""
+    depths = cli._snapshot_depths(_depth_meta(_linear_chain(5000)), "daily")
+    assert depths["s0"] == 0
+    assert depths["s4999"] == 4999
+
+
+def test_snapshot_depths_ignore_missing_parent():
+    snaps = [_remote("s1", 1, parent="gone")]
+    assert cli._snapshot_depths(_depth_meta(snaps), "daily") == {"s1": 0}
+
+
+def test_snapshot_depths_survive_a_cycle():
+    snaps = [_remote("a", 1, parent="b"), _remote("b", 2, parent="a")]
+    depths = cli._snapshot_depths(_depth_meta(snaps), "daily")
+    assert set(depths) == {"a", "b"}
+    assert all(depth >= 0 for depth in depths.values())
+
+
+def test_cmd_list_handles_a_reversed_deep_chain(tmp_path, monkeypatch, capsys):
+    snaps = list(reversed(_linear_chain(1200)))
+    _list_setup(tmp_path, monkeypatch, snaps)
+    assert cli.cmd_list(_verify_args()) == 0
+    assert "s1199" in capsys.readouterr().out
+
+
 # --- config check -----------------------------------------------------------
 
 
