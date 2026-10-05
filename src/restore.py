@@ -1,11 +1,12 @@
 """Restore: replay a full + incremental send chain into a btrfs target."""
 
+import sys
 from pathlib import Path
 
 import manifest
 import send
 from remotes import create_remote
-from util import BtrbakError, is_btrfs, sha256_file
+from util import BtrbakError, is_btrfs, is_subvolume, sha256_file
 
 
 def build_chain(meta: dict, profile_name: str, snapshot_id: str) -> list[str]:
@@ -51,15 +52,37 @@ def codec_for_snapshot(snap: dict, config) -> tuple:
     )
 
 
+def _resume_point(target: Path, chain: list[str]) -> int:
+    """Return the index of the first link in *chain* that still needs receiving.
+
+    ``btrfs receive`` creates one subvolume per stream, named after the
+    snapshot id, directly inside the target. A restore interrupted part way
+    through therefore leaves a prefix of the chain already present, and
+    replaying it again would fail with ``File exists``. When the prefix is
+    intact, the already-received links are skipped so the restore resumes.
+
+    Raises :class:`BtrbakError` when the target holds a non-subvolume entry
+    under a snapshot id, since that would block ``btrfs receive`` and silently
+    invalidate the chain.
+    """
+    for index, sid in enumerate(chain):
+        entry = target / sid
+        if not entry.exists():
+            return index
+        if not is_subvolume(entry):
+            raise BtrbakError(
+                f"restore target already contains {entry} which is not a btrfs "
+                "subvolume; remove it before restoring"
+            )
+    return len(chain)
+
+
 def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
     target = Path(target)
     if target.exists() and not target.is_dir():
         raise BtrbakError(f"restore target exists and is not a directory: {target}")
     if not is_btrfs(target):
         raise BtrbakError(f"restore target must be on a btrfs filesystem: {target}")
-    # Create the target only once it is known to be usable, so that a failed
-    # validation never leaves an empty directory tree behind.
-    target.mkdir(parents=True, exist_ok=True)
 
     if manifest.get_snapshot(meta, profile_name, snapshot_id) is None:
         raise BtrbakError(f"snapshot not found: {profile_name}/{snapshot_id}")
@@ -69,6 +92,8 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
         spec.id: create_remote(spec) for spec in config.profiles[profile_name].remotes
     }
 
+    # Validate the whole chain, and the resume point, before creating the
+    # target: a rejected restore must never leave an empty directory behind.
     for sid in chain:
         snap = manifest.get_snapshot(meta, profile_name, sid)
         if snap.get("type") == "local":
@@ -76,9 +101,23 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
                 f"snapshot {sid} is local-only and has no offsite copy; "
                 "restore it from the local dest instead"
             )
-        remote = pick_remote(snap, remote_map)
-        if remote is None:
+        if pick_remote(snap, remote_map) is None:
             raise BtrbakError(f"no complete remote upload for snapshot {sid}")
+
+    resume_at = _resume_point(target, chain)
+    if resume_at:
+        print(
+            f"resuming restore: {resume_at} of {len(chain)} link(s) already "
+            f"present in {target}",
+            file=sys.stderr,
+        )
+    # Create the target only once it is known to be usable, so that a failed
+    # validation never leaves an empty directory tree behind.
+    target.mkdir(parents=True, exist_ok=True)
+
+    for sid in chain[resume_at:]:
+        snap = manifest.get_snapshot(meta, profile_name, sid)
+        remote = pick_remote(snap, remote_map)
 
         compression, encryption = codec_for_snapshot(snap, config)
         tmpfile = tmpdir / f"{sid}.send"

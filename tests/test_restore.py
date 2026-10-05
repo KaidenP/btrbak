@@ -1,9 +1,10 @@
-import pytest
+from pathlib import Path
 from types import SimpleNamespace
 
-import yaml
+import pytest
 
 import restore
+import yaml
 
 
 def _config(compression=None, encryption=None):
@@ -149,12 +150,60 @@ def test_restore_creates_target_on_btrfs(tmp_path, monkeypatch):
     meta = {
         "version": 1,
         "profiles": {
+            "p": {
+                "snapshots": [
+                    {
+                        "id": "sid",
+                        "type": "full",
+                        "parent": None,
+                        "file": "p/sid.send",
+                        "sha256": "d",
+                        "size": 1,
+                        "uploads": [{"remote": "r", "status": "complete"}],
+                    }
+                ]
+            }
+        },
+    }
+
+    received = []
+
+    monkeypatch.setattr(restore, "create_remote", lambda spec: _fake_remote())
+    monkeypatch.setattr(restore, "sha256_file", lambda path: "d")
+    monkeypatch.setattr(
+        restore.send, "restore_stream", lambda f, t, c, e: received.append((f, t))
+    )
+
+    restore.restore(
+        SimpleNamespace(
+            profiles={
+                "p": SimpleNamespace(remotes=[SimpleNamespace(id="r", type="dir")])
+            },
+            compression=None,
+            encryption=None,
+        ),
+        "p",
+        "sid",
+        target,
+        meta,
+        tmp_path,
+    )
+
+    assert target.is_dir()
+    assert len(received) == 1
+
+
+def test_restore_does_not_create_target_when_chain_is_unusable(tmp_path, monkeypatch):
+    """A rejected restore must not leave an empty directory tree behind."""
+    target = tmp_path / "target" / "deep"
+    monkeypatch.setattr(restore, "is_btrfs", lambda path: True)
+    meta = {
+        "version": 1,
+        "profiles": {
             "p": {"snapshots": [{"id": "sid", "type": "local", "parent": None}]}
         },
     }
 
-    # The target directory is created before the snapshot lookup fails, which
-    # is exactly what a usable btrfs target should look like.
     with pytest.raises(restore.BtrbakError, match="local-only"):
         restore.restore(
             SimpleNamespace(profiles={"p": SimpleNamespace(remotes=[])}),
@@ -165,4 +214,126 @@ def test_restore_creates_target_on_btrfs(tmp_path, monkeypatch):
             tmp_path,
         )
 
-    assert target.is_dir()
+    assert not target.exists()
+    assert not (tmp_path / "target").exists()
+
+
+# --- resumable restore ------------------------------------------------------
+
+
+def _chain_meta():
+    return {
+        "version": 1,
+        "profiles": {
+            "p": {
+                "snapshots": [
+                    {
+                        "id": "s1",
+                        "type": "full",
+                        "parent": None,
+                        "file": "p/s1.send",
+                        "sha256": "d",
+                        "size": 1,
+                        "uploads": [{"remote": "r", "status": "complete"}],
+                    },
+                    {
+                        "id": "s2",
+                        "type": "incr",
+                        "parent": "s1",
+                        "file": "p/s2.send",
+                        "sha256": "d",
+                        "size": 1,
+                        "uploads": [{"remote": "r", "status": "complete"}],
+                    },
+                ]
+            }
+        },
+    }
+
+
+def _restore_cfg():
+    return SimpleNamespace(
+        profiles={"p": SimpleNamespace(remotes=[SimpleNamespace(id="r", type="dir")])},
+        compression=None,
+        encryption=None,
+    )
+
+
+def _fake_remote():
+    class _FakeRemote:
+        def read(self, remote_path, local_dest):
+            local_dest.write_bytes(b"x")
+
+    return _FakeRemote()
+
+
+def _patch_restore(monkeypatch):
+    received = []
+
+    class _Remote:
+        def read(self, remote_path, local_dest):
+            local_dest.write_bytes(b"x")
+
+    monkeypatch.setattr(restore, "create_remote", lambda spec: _Remote())
+    monkeypatch.setattr(restore, "sha256_file", lambda path: "d")
+    monkeypatch.setattr(
+        restore.send,
+        "restore_stream",
+        lambda f, t, c, e: received.append(t / Path(f).name),
+    )
+    return received
+
+
+def test_restore_skips_already_received_links(tmp_path, monkeypatch):
+    """An interrupted restore resumes instead of failing with 'File exists'."""
+    target = tmp_path / "target"
+    target.mkdir()
+    monkeypatch.setattr(restore, "is_btrfs", lambda path: True)
+    monkeypatch.setattr(restore, "is_subvolume", lambda path: True)
+    # s1 is already present from the interrupted run.
+    (target / "s1").mkdir()
+    received = _patch_restore(monkeypatch)
+
+    restore.restore(_restore_cfg(), "p", "s2", target, _chain_meta(), tmp_path)
+
+    assert received == [target / "s2.send"]
+
+
+def test_resume_point_returns_first_missing(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "s1").mkdir()
+    monkeypatch.setattr(restore, "is_subvolume", lambda path: True)
+    assert restore._resume_point(target, ["s1", "s2"]) == 1
+
+
+def test_resume_point_complete_chain(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "s1").mkdir()
+    (target / "s2").mkdir()
+    monkeypatch.setattr(restore, "is_subvolume", lambda path: True)
+    assert restore._resume_point(target, ["s1", "s2"]) == 2
+
+
+def test_resume_point_rejects_non_subvolume_entry(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "s1").mkdir()
+    monkeypatch.setattr(restore, "is_subvolume", lambda path: False)
+    with pytest.raises(restore.BtrbakError, match="not a btrfs subvolume"):
+        restore._resume_point(target, ["s1", "s2"])
+
+
+def test_restore_reports_resume(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "target"
+    target.mkdir()
+    monkeypatch.setattr(restore, "is_btrfs", lambda path: True)
+    monkeypatch.setattr(restore, "is_subvolume", lambda path: True)
+    (target / "s1").mkdir()
+    _patch_restore(monkeypatch)
+
+    restore.restore(_restore_cfg(), "p", "s2", target, _chain_meta(), tmp_path)
+
+    err = capsys.readouterr().err
+    assert "resuming restore: 1 of 2 link(s) already present" in err
