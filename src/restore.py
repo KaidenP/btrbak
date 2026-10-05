@@ -49,6 +49,8 @@ def codec_for_snapshot(snap: dict, profile_meta: dict) -> tuple:
 
 def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
     target = Path(target)
+    if target.exists() and not target.is_dir():
+        raise BtrbakError(f"restore target exists and is not a directory: {target}")
     target.mkdir(parents=True, exist_ok=True)
     if not is_btrfs(target):
         raise BtrbakError(f"restore target must be on a btrfs filesystem: {target}")
@@ -64,6 +66,11 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
 
     for sid in chain:
         snap = manifest.get_snapshot(meta, profile_name, sid)
+        if snap.get("type") == "local":
+            raise BtrbakError(
+                f"snapshot {sid} is local-only and has no offsite copy; "
+                "restore it from the local dest instead"
+            )
         remote = pick_remote(snap, remote_map)
         if remote is None:
             raise BtrbakError(f"no complete remote upload for snapshot {sid}")

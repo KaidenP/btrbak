@@ -63,3 +63,10 @@ def test_build_chain_detects_cycle():
     }
     with pytest.raises(restore.BtrbakError):
         restore.build_chain(meta, "p", "a")
+
+
+def test_restore_target_is_file_raises(tmp_path):
+    target = tmp_path / "target"
+    target.write_text("x")
+    with pytest.raises(restore.BtrbakError):
+        restore.restore(None, "p", "sid", target, {}, tmp_path)

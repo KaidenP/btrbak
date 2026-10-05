@@ -72,7 +72,11 @@ def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None)
         if use_age:
             age_cmd = ["age"]
             for recipient in encryption["recipients"]:
-                age_cmd += ["-r", str(recipient)]
+                recipient = str(recipient)
+                if os.path.exists(recipient):
+                    age_cmd += ["-R", recipient]
+                else:
+                    age_cmd += ["-r", recipient]
             age_cmd += ["-o", str(out_path), str(current)]
             run(age_cmd)
         else:
