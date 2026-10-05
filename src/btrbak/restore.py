@@ -6,7 +6,7 @@ from pathlib import Path
 from . import manifest
 from . import send
 from .remotes import create_remote
-from .util import BtrbakError, is_btrfs, is_subvolume, sha256_file, subvolume_uuid
+from .util import BtrbakError, is_btrfs, is_subvolume, scratch_dir, sha256_file, subvolume_uuid
 
 
 def build_chain(meta: dict, profile_name: str, snapshot_id: str) -> list[str]:
@@ -52,7 +52,7 @@ def codec_for_snapshot(snap: dict, config) -> tuple:
     )
 
 
-def _resume_point(target: Path, chain: list[str]) -> int:
+def _resume_point(target: Path, chain: list[str], meta: dict, profile_name: str) -> int:
     """Return the index of the first link in *chain* that still needs receiving.
 
     ``btrfs receive`` creates one subvolume per stream, named after the
@@ -61,9 +61,17 @@ def _resume_point(target: Path, chain: list[str]) -> int:
     replaying it again would fail with ``File exists``. When the prefix is
     intact, the already-received links are skipped so the restore resumes.
 
+    Presence alone is not enough: an unrelated subvolume that merely occupies a
+    snapshot id would be skipped and the remaining links replayed on top of it,
+    yielding a target that looks restored but holds the wrong data. Each
+    present link therefore has to be the subvolume the manifest recorded for
+    that snapshot id -- ``btrfs receive`` reports the sent subvolume's UUID,
+    so a correctly received link matches exactly. Manifests written before
+    UUIDs were recorded carry no ``uuid`` and fall back to the name-only check.
+
     Raises :class:`BtrbakError` when the target holds a non-subvolume entry
-    under a snapshot id, since that would block ``btrfs receive`` and silently
-    invalidate the chain.
+    under a snapshot id, or a subvolume with a different UUID, since either
+    would block ``btrfs receive`` or silently invalidate the chain.
     """
     for index, sid in enumerate(chain):
         entry = target / sid
@@ -73,6 +81,15 @@ def _resume_point(target: Path, chain: list[str]) -> int:
             raise BtrbakError(
                 f"restore target already contains {entry} which is not a btrfs "
                 "subvolume; remove it before restoring"
+            )
+        expected = (manifest.get_snapshot(meta, profile_name, sid) or {}).get("uuid")
+        if not expected:
+            continue
+        actual = subvolume_uuid(entry)
+        if actual != expected:
+            raise BtrbakError(
+                f"restore target already contains {entry} with UUID {actual or 'unknown'}, "
+                f"but snapshot {sid} is {expected}; remove it before restoring"
             )
     return len(chain)
 
@@ -104,7 +121,7 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
         if pick_remote(snap, remote_map) is None:
             raise BtrbakError(f"no complete remote upload for snapshot {sid}")
 
-    resume_at = _resume_point(target, chain)
+    resume_at = _resume_point(target, chain, meta, profile_name)
     if resume_at:
         print(
             f"resuming restore: {resume_at} of {len(chain)} link(s) already "
@@ -137,10 +154,9 @@ def run_restore(config, profile_name, snapshot_id, target) -> None:
     if profile_name not in config.profiles:
         raise BtrbakError(f"unknown profile: {profile_name}")
 
-    tmpdir = config.tmpdir / config.name / "restore"
-    tmpdir.mkdir(parents=True, exist_ok=True)
-    meta = load_meta_for_restore(config, profile_name, tmpdir)
-    restore(config, profile_name, snapshot_id, target, meta, tmpdir)
+    with scratch_dir(config.tmpdir / config.name / "restore") as tmpdir:
+        meta = load_meta_for_restore(config, profile_name, tmpdir)
+        restore(config, profile_name, snapshot_id, target, meta, tmpdir)
 
 
 def load_meta_for_restore(config, profile_name, tmpdir) -> dict:

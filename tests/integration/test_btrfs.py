@@ -16,6 +16,7 @@ from btrbak import manifest
 from btrbak import restore
 from btrbak import send
 from btrbak import snapshot
+from btrbak import util
 from btrbak.config import Config, Profile, RemoteSpec
 
 pytestmark = pytest.mark.skipif(os.geteuid() != 0, reason="requires root")
@@ -344,3 +345,68 @@ def test_restore_rejects_foreign_entry_in_target(btrfs_fs, monkeypatch):
 
     with pytest.raises(restore.BtrbakError, match="not a btrfs subvolume"):
         restore.run_restore(cfg, "daily", snap_id, target)
+
+
+def test_restore_rejects_foreign_subvolume_in_target(btrfs_fs, monkeypatch):
+    """A same-named subvolume that is not the snapshot must not be skipped.
+
+    Treating it as an already-received link would replay the rest of the chain
+    on top of the wrong base and exit 0 with silently wrong data.
+    """
+    mnt = btrfs_fs
+    src, snapshots, target = _setup(mnt, "decoy")
+    remote_root = mnt / "decoy" / "remote"
+    tmpdir = mnt / "decoy" / "tmp"
+    remote_root.mkdir()
+    tmpdir.mkdir()
+    cfg = _pipeline_cfg(mnt, "decoy", src, snapshots, remote_root, tmpdir)
+
+    (src / "a.txt").write_text("a\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 0)
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
+    full_id = manifest.snapshots(manifest.load(snapshots / "meta.yaml"), "daily")[0]["id"]
+
+    # An unrelated subvolume squatting on the chain link's name.
+    decoy = mnt / "decoy" / "decoy"
+    target.mkdir()
+    _run(["btrfs", "subvolume", "create", str(decoy)])
+    _run(["btrfs", "subvolume", "set-default", str(decoy)])
+    (decoy / "decoy.txt").write_text("not the real data\n")
+    _run(["btrfs", "subvolume", "snapshot", "-r", str(decoy), str(target / full_id)])
+
+    # The manifest records the sent identity, which a locally-created decoy
+    # can never match.
+    assert util.subvolume_uuid(snapshots / "daily" / full_id)
+    assert util.subvolume_uuid(decoy) != util.subvolume_uuid(snapshots / "daily" / full_id)
+
+    with pytest.raises(restore.BtrbakError, match="remove it before restoring"):
+        restore.run_restore(cfg, "daily", full_id, target)
+
+
+def test_restore_resumes_into_a_recovered_target(btrfs_fs, monkeypatch):
+    """A link received by an earlier restore matches the recorded UUID.
+
+    ``btrfs receive`` assigns the recovered subvolume a fresh UUID of its own
+    and keeps the sent one as ``Received UUID``, so a resumed chain has to
+    compare against the latter.
+    """
+    mnt = btrfs_fs
+    src, snapshots, target = _setup(mnt, "recovered")
+    remote_root = mnt / "recovered" / "remote"
+    tmpdir = mnt / "recovered" / "tmp"
+    remote_root.mkdir()
+    tmpdir.mkdir()
+    cfg = _pipeline_cfg(mnt, "recovered", src, snapshots, remote_root, tmpdir)
+
+    (src / "a.txt").write_text("a\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 0)
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
+    full_id = manifest.snapshots(manifest.load(snapshots / "meta.yaml"), "daily")[0]["id"]
+
+    restore.run_restore(cfg, "daily", full_id, target)
+    assert (target / full_id / "a.txt").read_text() == "a\n"
+
+    # Re-running over the already-received link is a no-op, not a failure.
+    restore.run_restore(cfg, "daily", full_id, target)
+    assert (target / full_id / "a.txt").read_text() == "a\n"
+    assert not (cfg.tmpdir / cfg.name / "restore").exists()

@@ -22,6 +22,63 @@ def test_is_subvolume_missing_binary_returns_false(monkeypatch):
     assert util.is_subvolume("/x") is False
 
 
+def _stub_subvolume_show(monkeypatch, text, returncode=0):
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=text.encode()
+    )
+    monkeypatch.setattr(util.subprocess, "run", lambda *a, **k: completed)
+
+
+def test_subvolume_uuid_parses_own_uuid(monkeypatch):
+    """A local snapshot carries its own UUID (no Received UUID set)."""
+    _stub_subvolume_show(
+        monkeypatch,
+        "snap/subvol\n"
+        "\tName: \t\t\tsnap\n"
+        "\tUUID: \t\t\t32fce6b5-1603-f54d-a7d8-db6135d2316f\n"
+        "\tParent UUID: \t\t1a4e89ce-51ad-f745-92f1-b1f1e79aac12\n"
+        "\tReceived UUID: \t-\n",
+    )
+    assert util.subvolume_uuid("/x") == "32fce6b5-1603-f54d-a7d8-db6135d2316f"
+
+
+def test_subvolume_uuid_prefers_received_uuid(monkeypatch):
+    """A received copy keeps the sent UUID as Received UUID and gets a new own one.
+
+    Only the Received UUID round-trips through send/receive, so comparing the
+    plain UUID column would reject every correctly received link.
+    """
+    _stub_subvolume_show(
+        monkeypatch,
+        "\tUUID: \t\t\tbbbbbbbb-1111-2222-3333-444444444444\n"
+        "\tParent UUID: \t\t-\n"
+        "\tReceived UUID: \taaaaaaaa-1111-2222-3333-444444444444\n",
+    )
+    assert util.subvolume_uuid("/x") == "aaaaaaaa-1111-2222-3333-444444444444"
+
+
+def test_subvolume_uuid_is_case_insensitive(monkeypatch):
+    _stub_subvolume_show(
+        monkeypatch,
+        "\tUUID: \t\t\t32FCE6B5-1603-F54D-A7D8-DB6135D2316F\n"
+        "\tReceived UUID: \t-\n",
+    )
+    assert util.subvolume_uuid("/x") == "32fce6b5-1603-f54d-a7d8-db6135d2316f"
+
+
+def test_subvolume_uuid_returns_none_when_not_a_subvolume(monkeypatch):
+    _stub_subvolume_show(monkeypatch, "", returncode=1)
+    assert util.subvolume_uuid("/x") is None
+
+
+def test_subvolume_uuid_returns_none_when_binary_missing(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory: btrfs")
+
+    monkeypatch.setattr(util.subprocess, "run", fake_run)
+    assert util.subvolume_uuid("/x") is None
+
+
 def test_age_recipient_kind(tmp_path):
     keyfile = tmp_path / "recipients.txt"
     keyfile.write_text("age1abc\n")

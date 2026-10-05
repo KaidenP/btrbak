@@ -304,7 +304,7 @@ def test_resume_point_returns_first_missing(tmp_path, monkeypatch):
     target.mkdir()
     (target / "s1").mkdir()
     monkeypatch.setattr(restore, "is_subvolume", lambda path: True)
-    assert restore._resume_point(target, ["s1", "s2"]) == 1
+    assert restore._resume_point(target, ["s1", "s2"], _chain_meta(), "p") == 1
 
 
 def test_resume_point_complete_chain(tmp_path, monkeypatch):
@@ -313,7 +313,7 @@ def test_resume_point_complete_chain(tmp_path, monkeypatch):
     (target / "s1").mkdir()
     (target / "s2").mkdir()
     monkeypatch.setattr(restore, "is_subvolume", lambda path: True)
-    assert restore._resume_point(target, ["s1", "s2"]) == 2
+    assert restore._resume_point(target, ["s1", "s2"], _chain_meta(), "p") == 2
 
 
 def test_resume_point_rejects_non_subvolume_entry(tmp_path, monkeypatch):
@@ -322,7 +322,80 @@ def test_resume_point_rejects_non_subvolume_entry(tmp_path, monkeypatch):
     (target / "s1").mkdir()
     monkeypatch.setattr(restore, "is_subvolume", lambda path: False)
     with pytest.raises(restore.BtrbakError, match="not a btrfs subvolume"):
-        restore._resume_point(target, ["s1", "s2"])
+        restore._resume_point(target, ["s1", "s2"], _chain_meta(), "p")
+
+
+def test_resume_point_accepts_matching_uuid(tmp_path, monkeypatch):
+    """A correctly received link carries the sent subvolume's UUID."""
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "s1").mkdir()
+    meta = _chain_meta()
+    meta["profiles"]["p"]["snapshots"][0]["uuid"] = "aaaa"
+    monkeypatch.setattr(restore, "is_subvolume", lambda path: True)
+    monkeypatch.setattr(restore, "subvolume_uuid", lambda path: "aaaa")
+    assert restore._resume_point(target, ["s1", "s2"], meta, "p") == 1
+
+
+def test_resume_point_rejects_foreign_subvolume(tmp_path, monkeypatch):
+    """A same-named subvolume that is not this snapshot must not be skipped.
+
+    Skipping it would replay the rest of the chain on top of the wrong base
+    and report success with silently incorrect data.
+    """
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "s1").mkdir()
+    meta = _chain_meta()
+    meta["profiles"]["p"]["snapshots"][0]["uuid"] = "aaaa"
+    monkeypatch.setattr(restore, "is_subvolume", lambda path: True)
+    monkeypatch.setattr(restore, "subvolume_uuid", lambda path: "bbbb")
+    with pytest.raises(restore.BtrbakError, match="remove it before restoring"):
+        restore._resume_point(target, ["s1", "s2"], meta, "p")
+
+
+def test_resume_point_rejects_subvolume_with_unreadable_uuid(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "s1").mkdir()
+    meta = _chain_meta()
+    meta["profiles"]["p"]["snapshots"][0]["uuid"] = "aaaa"
+    monkeypatch.setattr(restore, "is_subvolume", lambda path: True)
+    monkeypatch.setattr(restore, "subvolume_uuid", lambda path: None)
+    with pytest.raises(restore.BtrbakError, match="unknown"):
+        restore._resume_point(target, ["s1", "s2"], meta, "p")
+
+
+def test_resume_point_ignores_uuid_when_manifest_has_none(tmp_path, monkeypatch):
+    """Manifests written before UUIDs were recorded fall back to name-only."""
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "s1").mkdir()
+    monkeypatch.setattr(restore, "is_subvolume", lambda path: True)
+    monkeypatch.setattr(
+        restore, "subvolume_uuid", lambda path: pytest.fail("should not be read")
+    )
+    assert restore._resume_point(target, ["s1", "s2"], _chain_meta(), "p") == 1
+
+
+def test_restore_rejects_foreign_subvolume_in_target(tmp_path, monkeypatch):
+    """An end-to-end restore must refuse a decoy subvolume at a chain link."""
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "s1").mkdir()
+    meta = _chain_meta()
+    meta["profiles"]["p"]["snapshots"][0]["uuid"] = "aaaa"
+    monkeypatch.setattr(restore, "is_btrfs", lambda path: True)
+    monkeypatch.setattr(restore, "is_subvolume", lambda path: True)
+    monkeypatch.setattr(restore, "subvolume_uuid", lambda path: "bbbb")
+    monkeypatch.setattr(restore, "create_remote", lambda spec: _fake_remote())
+    monkeypatch.setattr(
+        restore.send,
+        "restore_stream",
+        lambda *a, **k: pytest.fail("must not receive onto a foreign subvolume"),
+    )
+    with pytest.raises(restore.BtrbakError, match="remove it before restoring"):
+        restore.restore(_restore_cfg(), "p", "s2", target, meta, tmp_path)
 
 
 def test_restore_reports_resume(tmp_path, monkeypatch, capsys):

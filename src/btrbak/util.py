@@ -96,6 +96,31 @@ def optional_lock(path):
         os.close(fd)
 
 
+def rmdir_quiet(path) -> None:
+    """Remove an empty directory, ignoring a missing or non-empty one."""
+    try:
+        Path(path).rmdir()
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def scratch_dir(path):
+    """Yield an existing scratch directory, removing it again when it ends empty.
+
+    ``verify`` and ``restore`` download send files into a directory under
+    ``tmpdir``; both unlink their downloads as they go, so the directory is
+    empty by the time they finish and is removed instead of being left behind
+    for every future invocation to trip over.
+    """
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        yield path
+    finally:
+        rmdir_quiet(path)
+
+
 def _open_lock(path) -> int:
     """Open (creating if needed) *path* for flock and return the descriptor."""
     path = Path(path)
@@ -230,21 +255,30 @@ def is_subvolume(path) -> bool:
     return _subvolume_show(path) is not None
 
 
-def subvolume_uuid(path) -> str | None:
-    """Return the btrfs subvolume UUID of *path*, or ``None``.
+_OWN_UUID_RE = re.compile(r"^\s*UUID:\s*(\S+)", re.MULTILINE)
+_RECEIVED_UUID_RE = re.compile(r"^\s*Received UUID:\s*(\S+)", re.MULTILINE)
 
-    This is the identifier ``btrfs receive`` matches an incremental parent
-    against, and it survives a send/receive round trip: a received subvolume
-    reports the sent subvolume's UUID here. Recording it in ``meta.yaml`` lets
-    ``restore`` tell a genuinely already-received link apart from an unrelated
-    subvolume that merely occupies the same name in the target.
+
+def subvolume_uuid(path) -> str | None:
+    """Return the UUID btrfs carries for *path* in a ``btrfs send`` stream.
+
+    A local snapshot reports that identity as its own ``UUID``. A copy
+    recovered by ``btrfs receive`` instead reports the sent subvolume's UUID as
+    its ``Received UUID`` and gets a freshly assigned ``UUID`` of its own, so
+    the two are only comparable when ``Received UUID`` wins when present --
+    which is precisely the identity ``btrfs receive`` matches an incremental
+    parent against. Recording it in ``meta.yaml`` lets ``restore`` tell a
+    genuinely already-received link apart from an unrelated subvolume that
+    merely occupies the same name in the target.
     """
     text = _subvolume_show(path)
     if text is None:
         return None
-    # Anchored so ``Received UUID:`` is not mistaken for ``UUID:``.
-    match = re.search(r"^\s*UUID:\s*(\S+)", text, re.MULTILINE)
-    return match.group(1).strip().lower() if match else None
+    for pattern in (_RECEIVED_UUID_RE, _OWN_UUID_RE):
+        match = pattern.search(text)
+        if match and match.group(1) != "-":
+            return match.group(1).strip().lower()
+    return None
 
 
 def which(binary) -> bool:

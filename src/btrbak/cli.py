@@ -320,6 +320,7 @@ def run_profile(cfg, profile, meta, remotes, force, full) -> int:
         "created": now_ts,
         "type": stype,
         "parent": parent_id,
+        "uuid": util.subvolume_uuid(snap_path),
         "compression": cfg.compression if remotes else None,
         "encryption": cfg.encryption if remotes else None,
         "file": f"{pname}/{snap_id}.send" if remotes else None,
@@ -776,24 +777,23 @@ def _load_meta_for_verify(cfg):
     if local.exists():
         return manifest.load(local), False
 
-    tmpdir = cfg.tmpdir / cfg.name / "verify"
-    tmpdir.mkdir(parents=True, exist_ok=True)
-    seen = set()
-    for profile in cfg.profiles.values():
-        for spec in profile.remotes:
-            key = config_mod.remote_identity(spec)
-            if key in seen:
-                continue
-            seen.add(key)
-            remote = create_remote(spec)
-            tmp = tmpdir / "meta.yaml"
-            try:
-                remote.read("meta.yaml", tmp)
-                return manifest.load(tmp), True
-            except Exception:  # noqa: BLE001 - try the next remote
-                continue
-            finally:
-                tmp.unlink(missing_ok=True)
+    with util.scratch_dir(cfg.tmpdir / cfg.name / "verify") as tmpdir:
+        seen = set()
+        for profile in cfg.profiles.values():
+            for spec in profile.remotes:
+                key = config_mod.remote_identity(spec)
+                if key in seen:
+                    continue
+                seen.add(key)
+                remote = create_remote(spec)
+                tmp = tmpdir / "meta.yaml"
+                try:
+                    remote.read("meta.yaml", tmp)
+                    return manifest.load(tmp), True
+                except Exception:  # noqa: BLE001 - try the next remote
+                    continue
+                finally:
+                    tmp.unlink(missing_ok=True)
     return None, False
 
 
@@ -845,18 +845,19 @@ def _verify_config(cfg) -> int:
                 "verifying against a remote copy"
             )
         by_profile = collect_remotes(cfg)
-        for pname in cfg.profiles:
-            lookup = {spec.id: (spec, remote) for spec, remote in by_profile[pname]}
-            for snap in manifest.snapshots(meta, pname):
-                failures += _verify_snapshot(
-                    cfg, meta, pname, snap, lookup
-                )
+        with util.scratch_dir(cfg.tmpdir / cfg.name / "verify") as tmpdir:
+            for pname in cfg.profiles:
+                lookup = {spec.id: (spec, remote) for spec, remote in by_profile[pname]}
+                for snap in manifest.snapshots(meta, pname):
+                    failures += _verify_snapshot(
+                        cfg, meta, pname, snap, lookup, tmpdir
+                    )
         if failures == 0:
             print(f"{cfg.name}: ok")
         return failures
 
 
-def _verify_snapshot(cfg, meta, pname, snap, lookup) -> int:
+def _verify_snapshot(cfg, meta, pname, snap, lookup, tmpdir) -> int:
     """Verify a single snapshot against its local subvolume and remotes."""
     failures = 0
     sid = snap.get("id")
@@ -869,9 +870,22 @@ def _verify_snapshot(cfg, meta, pname, snap, lookup) -> int:
         return failures
 
     parent = snap.get("parent")
-    if parent and manifest.get_snapshot(meta, pname, parent) is None:
-        print(f"BROKEN CHAIN {where}: parent {parent} missing")
-        failures += 1
+    if parent:
+        parent_snap = manifest.get_snapshot(meta, pname, parent)
+        if parent_snap is None:
+            print(f"BROKEN CHAIN {where}: parent {parent} missing")
+            failures += 1
+        elif parent_snap.get("type") == "local":
+            print(
+                f"BROKEN CHAIN {where}: parent {parent} is local-only, so the "
+                "chain can never be restored offsite"
+            )
+            failures += 1
+        elif not manifest.committed(parent_snap):
+            print(
+                f"BROKEN CHAIN {where}: parent {parent} has no complete upload"
+            )
+            failures += 1
 
     uploads = snap.get("uploads") or []
     if not uploads:
@@ -883,7 +897,7 @@ def _verify_snapshot(cfg, meta, pname, snap, lookup) -> int:
         print(f"INCOMPLETE {where}: remote-backed snapshot has no 'file' recorded")
         return failures + 1
 
-    tmp = cfg.tmpdir / cfg.name / "verify" / f"{sid}.send"
+    tmp = tmpdir / f"{sid}.send"
     for upload in uploads:
         if upload.get("status") != "complete":
             print(f"INCOMPLETE {where} on remote {upload.get('remote')}")
