@@ -266,6 +266,13 @@ def compute_plan(profile, meta, now_ts, force=False, full=False):
         return False, None, None
 
     last_full = manifest.last_full_committed(meta, pname)
+    # Only a snapshot with an offsite copy can be a send parent: parenting an
+    # incremental onto a local-only entry yields a chain whose root has no
+    # send file, so the whole chain becomes unrestorable. That is exactly the
+    # state a profile is in when remotes are added to one that has been
+    # snapshotting locally, and it also makes the profile look like it already
+    # has a backup when it does not.
+    last = manifest.last_remote_committed(meta, pname)
     has_auto = (not timespan.is_never(profile.freq_full)) or (
         not timespan.is_never(profile.freq_incr)
     )

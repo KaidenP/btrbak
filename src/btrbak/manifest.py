@@ -152,6 +152,25 @@ def last_committed(meta: dict, name: str) -> dict | None:
     return None
 
 
+def last_remote_committed(meta: dict, name: str) -> dict | None:
+    """Return the newest committed snapshot that has an offsite copy.
+
+    A snapshot only qualifies if it records a ``file``: that excludes
+    ``type: local`` snapshots and entries whose remotes were all removed. Both
+    are committed as far as retention is concerned, but neither can serve as a
+    ``btrfs send -p`` parent for a chain that has to be restorable offsite --
+    parenting onto one produces an ``incr`` whose chain root can never be
+    received, which is what happens when remotes are added to a profile that
+    already had local-only snapshots.
+    """
+    for snap in reversed(snapshots(meta, name)):
+        if snap.get("local_deleted") or not snap.get("file"):
+            continue
+        if committed(snap):
+            return snap
+    return None
+
+
 def last_full_committed(meta: dict, name: str) -> dict | None:
     for snap in reversed(snapshots(meta, name)):
         if snap.get("local_deleted"):

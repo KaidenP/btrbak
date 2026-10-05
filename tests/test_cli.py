@@ -34,11 +34,16 @@ def _profile(name, full, incr, keep, remotes=None):
 
 
 def _remote(sid, created, parent=None, status="complete"):
+    # Real manifests always record a `file` for a remote-backed snapshot; the
+    # parent-selection logic relies on it to tell one from a local-only entry.
     return {
         "id": sid,
         "created": created,
         "type": "incr" if parent else "full",
         "parent": parent,
+        "file": f"daily/{sid}.send",
+        "sha256": "d",
+        "size": 1,
         "uploads": [{"remote": "r", "status": status}],
     }
 
@@ -56,6 +61,59 @@ def test_first_run_creates_full():
 def test_first_run_creates_full_when_full_never_but_incr_auto():
     profile = _profile("daily", -1, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
     due, stype, parent = cli.compute_plan(profile, {"profiles": {"daily": {"snapshots": []}}}, 5000)
+    assert (due, stype, parent) == (True, "full", None)
+
+
+def test_local_only_snapshot_is_never_a_send_parent():
+    """Adding remotes to a profile that already has local snapshots.
+
+    The chain needs a root of its own: parenting onto a local-only entry
+    produces an `incr` whose parent has no send file, so the chain can never
+    be restored offsite.
+    """
+    profile = _profile("daily", -1, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    meta = {"profiles": {"daily": {"snapshots": [_local("l1", 4990)]}}}
+    due, stype, parent = cli.compute_plan(profile, meta, 5000, force=True)
+    assert (due, stype, parent) == (True, "full", None)
+
+
+def test_full_is_due_when_only_local_snapshots_exist_even_if_recent():
+    """Local entries must not satisfy the incremental cadence either."""
+    profile = _profile("daily", -1, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    meta = {"profiles": {"daily": {"snapshots": [_local("l1", 4999)]}}}
+    due, stype, parent = cli.compute_plan(profile, meta, 5000)
+    assert (due, stype, parent) == (True, "full", None)
+
+
+def test_incremental_still_parents_onto_the_latest_remote_snapshot():
+    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    meta = {"profiles": {"daily": {"snapshots": [_remote("f1", 0), _remote("i1", 1000, "f1")]}}}
+    due, stype, parent = cli.compute_plan(profile, meta, 1500, force=True)
+    assert (due, stype, parent) == (True, "incr", "i1")
+
+
+def test_snapshot_with_no_remote_copy_is_never_a_send_parent():
+    """An entry whose remotes were all removed is committed but has no file."""
+    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    orphan = {
+        "id": "o1",
+        "created": 1000,
+        "type": "full",
+        "parent": None,
+        "file": None,
+        "committed": True,
+        "uploads": [],
+    }
+    meta = {"profiles": {"daily": {"snapshots": [orphan]}}}
+    due, stype, parent = cli.compute_plan(profile, meta, 1500, force=True)
+    assert (due, stype, parent) == (True, "full", None)
+
+
+def test_local_deleted_snapshot_is_never_a_send_parent():
+    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    gone = dict(_remote("f1", 0), local_deleted=True)
+    meta = {"profiles": {"daily": {"snapshots": [gone]}}}
+    due, stype, parent = cli.compute_plan(profile, meta, 1500, force=True)
     assert (due, stype, parent) == (True, "full", None)
 
 
