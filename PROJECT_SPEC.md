@@ -137,7 +137,7 @@ compression:                        # optional; omit for no compression
 encryption:                         # optional; omit for no encryption
   algorithm: age                    # v1: age (only; future: gpg, none)
   recipients:                       # required when encryption enabled
-    - age1qxy...                    # inline age public key, or a path to a key file
+    - age1qxy...                    # inline age public key, or a path to a recipients file (one key per line)
   identity: /root/.config/age/btrbak.key   # optional; private key path, required for restore
 
 profiles:                           # required; at least one
@@ -571,8 +571,11 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 - A remote `config.yaml` is never silently overwritten; a differing remote copy
   is an error unless `--force-config` is passed.
 - `auth.yaml` and the age identity file should be `0600`; the tool warns if not.
-- The uploaded `config.yaml` copy contains no secrets: `auth:` values are keys
-  into the local-only `auth.yaml`, which is never uploaded.
+- The uploaded `config.yaml` copy contains no secrets as long as credentials
+  are referenced via `auth:` keys into the local-only `auth.yaml`, which is
+  never uploaded. Inline remote credentials written directly in a profile file
+  would be uploaded as part of `config.yaml`; route all secrets through
+  `auth.yaml` instead.
 - `keep` is measured against snapshot **creation** time.
 
 ---
