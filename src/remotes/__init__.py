@@ -1,7 +1,9 @@
 """Remote registry: maps a ``type`` string to a Remote class."""
 
-from .base import Remote, RemoteError, RemoteNotFoundError
+from .base import Remote, RemoteError
 from .dir import DirRemote
+
+__all__ = ["REGISTRY", "Remote", "create_remote"]
 
 REGISTRY = {
     "dir": DirRemote,
