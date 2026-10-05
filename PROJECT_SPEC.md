@@ -328,6 +328,13 @@ A snapshot is **committed** when every `uploads[].status == complete`. A
 local-only snapshot has no uploads and is committed immediately. For
 `type: local`, `file`, `sha256`, and `size` are null and `uploads` is empty.
 
+When a remote is removed from a profile, its upload records are dropped from
+existing snapshots. If a remote-backed snapshot is then left with no upload
+records (all of its remotes were removed), it is recorded with
+`committed: true` so it is no longer retried and is pruned by age/dependency
+like a local snapshot; any offsite copies on the removed remote are no longer
+managed. The `committed` key is optional and defaults to false (absent).
+
 The `remote` field is a **stable id**: the remote's `name` if set, otherwise a
 hash of its `type` plus non-secret settings. It does not depend on list order,
 so reordering remotes in the config never corrupts the manifest.
@@ -358,8 +365,8 @@ Per config file:
 4. **Sync settings** — for every unique remote across the selected profiles:
    - remote has no `config.yaml` → upload it;
    - remote `config.yaml` identical to local → skip;
-   - remote `config.yaml` differs → **error** unless `--force-config`, in which
-     case overwrite.
+   - remote `config.yaml` differs → **error** (exit `1`) unless `--force-config`,
+     in which case overwrite.
    `auth.yaml` is never uploaded.
 5. For each selected profile, run the profile pipeline (§9.1).
 6. Run pruning (§9.2).
@@ -416,8 +423,9 @@ A snapshot is deleted **if all** of the following hold:
 
 1. `now − created ≥ keep` (older than the retention window).
 2. No other snapshot in the profile lists it as `parent` (no dependents).
-3. All of its uploads are `complete` (a local-only snapshot has no uploads, so
-   this is trivially satisfied — local-only snapshots prune by age only).
+3. All of its uploads are `complete`, or it is marked `committed: true`
+   (a local-only snapshot has no uploads, so this is trivially satisfied —
+   local-only snapshots prune by age only).
 
 Deletion cascades leaf-first: repeat the scan until a pass deletes nothing
 (because deleting a leaf may make its parent deletable). For each deleted
@@ -505,9 +513,6 @@ class Remote(ABC):
 
     def delete(self, remote_path: str) -> None: ...
     # idempotent delete; missing file is not an error
-
-    def list(self, prefix: str = "") -> list[str]: ...
-    # list logical paths under prefix; used for reconcile/verify
 ```
 
 `src/remotes/dir.py` — `DirRemote`:
@@ -544,15 +549,23 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   anything.
 - `run` is the main entrypoint used by the external timer.
 - `--force-config` allows overwriting a differing remote `config.yaml` (§9).
-- `--full` forces a full (parentless) backup and implies `--force`.
+- `--full` forces a full (parentless) backup and implies `--force`. For
+  local-only profiles it has no effect (use `--force` to trigger a manual
+  local snapshot).
 - Manual profiles (those with `freq.* = -1`) are invoked explicitly:
   `btrbak run SUBVOL PROFILE --force` (e.g. from an apt hook).
 - `verify` checks every remote file against the manifest (existence, size,
   `sha256`) and that the dependency chain is intact; reports drift/failures.
+  When the local `<dest>/meta.yaml` is missing, `verify` falls back to a copy
+  downloaded from a configured remote; if no manifest is available locally or
+  on any remote, it reports an error.
 - `list` shows each profile's snapshots: id, age, type, parent, upload status,
   and a compact dependency tree.
-- Exit codes: `0` success; `1` runtime error; `2` config/validation error.
-- Logging to stderr (levels via `-v`); never log secrets or auth values.
+- Exit codes: `0` success; `1` runtime error (including a differing remote
+  `config.yaml` that is not overwritten); `2` config/validation error.
+- Logging to stderr (levels via `-v`); never log secrets or auth values, and
+  subprocess error messages include only the program name (plus stderr), never
+  command arguments.
 
 ---
 
@@ -617,3 +630,5 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 - Namespace the remote layout by config name so one remote root can be shared
   across configs (currently guarded by the `config.yaml` conflict check).
 - Remote-side `btrfs receive` (live btrfs target) as an alternative remote type.
+- Remote orphan reconciliation (a `Remote.list` primitive) so `verify` can
+  report files present on a remote but missing from the manifest.
