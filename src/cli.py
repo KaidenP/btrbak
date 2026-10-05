@@ -92,11 +92,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def cmd_run(args) -> int:
     configs = config_mod.discover_configs(args.subvol)
-    failures = 0
+    selected_configs = []
     for cfg in configs:
+        selected = config_mod.select_profiles(cfg, args.profile)
+        if selected is None:
+            continue
+        selected_configs.append(selected)
+    if args.profile and not selected_configs:
+        raise config_mod.ConfigError(f"unknown profile: {args.profile!r}")
+
+    failures = 0
+    for cfg in selected_configs:
         failures += run_config(
             cfg,
-            args.profile,
+            None,
             args.force,
             args.force_config,
             args.full,
@@ -399,7 +408,7 @@ def reconcile_uploads(snap, current_ids) -> None:
     kept = [best[rid] for rid in order]
     if kept != uploads:
         snap["uploads"] = kept
-    if snap.get("type") != "local" and uploads and not kept:
+    if snap.get("type") != "local" and not kept and not current_ids:
         snap["committed"] = True
 
 
@@ -422,9 +431,12 @@ def prune(cfg, meta, by_profile) -> None:
                         print(f"remote delete on {spec.id} failed: {exc}", file=sys.stderr)
                         delete_ok = False
             if not delete_ok:
-                # Keep the snapshot in the manifest so the remote delete is
-                # retried on the next run. The local subvolume is already gone,
-                # which is harmless: the offsite copy remains restorable.
+                # The local subvolume is already gone. Keep the manifest entry
+                # so the remote delete is retried on the next run, but flag it
+                # so it is never chosen as a future incremental send parent
+                # (its local data no longer exists).
+                if snap:
+                    snap["local_deleted"] = True
                 break
             manifest.remove_snapshot(meta, pname, sid)
 
@@ -583,8 +595,12 @@ def cmd_config_check(args) -> int:
 
 def cmd_list(args) -> int:
     configs = config_mod.discover_configs(args.subvol)
+    matched = False
     for cfg in configs:
-        selected = config_mod.filter_profiles(cfg, args.profile)
+        selected = config_mod.select_profiles(cfg, args.profile)
+        if selected is None:
+            continue
+        matched = True
         meta = manifest.load(cfg.dest / "meta.yaml")
         for pname in selected.profiles:
             print(f"{cfg.name}/{pname}:")
@@ -599,6 +615,8 @@ def cmd_list(args) -> int:
                     f"{'  ' * (depth + 1)}{snap['id']}  type={snap.get('type')}  "
                     f"age={age}s  parent={snap.get('parent') or '-'}  uploads=[{uploads}]"
                 )
+    if args.profile and not matched:
+        raise config_mod.ConfigError(f"unknown profile: {args.profile!r}")
     return 0
 
 
@@ -637,93 +655,105 @@ def _load_meta_for_verify(cfg):
 def cmd_verify(args) -> int:
     configs = config_mod.discover_configs(args.subvol)
     total_failures = 0
+    matched = False
     for cfg in configs:
-        selected = config_mod.filter_profiles(cfg, args.profile)
-        failures = 0
-        meta, used_remote = _load_meta_for_verify(selected)
-        if meta is None:
-            print(f"{cfg.name}: no manifest found locally or on any remote")
-            total_failures += 1
+        selected = config_mod.select_profiles(cfg, args.profile)
+        if selected is None:
             continue
-        if used_remote:
-            print(
-                f"{cfg.name}: local meta.yaml missing; "
-                "verifying against a remote copy"
-            )
-        by_profile = collect_remotes(selected)
-        for pname in selected.profiles:
-            lookup = {spec.id: (spec, remote) for spec, remote in by_profile[pname]}
-            for snap in manifest.snapshots(meta, pname):
-                if snap.get("type") == "local":
-                    if not (cfg.dest / pname / snap["id"]).exists():
-                        print(f"MISSING local snapshot {cfg.name}/{pname}/{snap['id']}")
-                        failures += 1
-                    continue
-                if snap.get("parent") and manifest.get_snapshot(
-                    meta, pname, snap["parent"]
-                ) is None:
-                    print(
-                        f"BROKEN CHAIN {cfg.name}/{pname}/{snap['id']}: "
-                        f"parent {snap['parent']} missing"
-                    )
-                    failures += 1
-                uploads = snap.get("uploads", [])
-                if not uploads:
-                    print(
-                        f"INCOMPLETE {cfg.name}/{pname}/{snap['id']}: "
-                        "no uploads recorded"
-                    )
-                    failures += 1
-                    continue
-                for upload in uploads:
-                    if upload.get("status") != "complete":
+        matched = True
+
+        remote_errors = config_mod.validate_remote_config(selected)
+        if remote_errors:
+            raise config_mod.ConfigError("\n".join(remote_errors))
+
+        with util.exclusive_lock(cfg.tmpdir / (cfg.name + ".lock")):
+            failures = 0
+            meta, used_remote = _load_meta_for_verify(selected)
+            if meta is None:
+                print(f"{cfg.name}: no manifest found locally or on any remote")
+                total_failures += 1
+                continue
+            if used_remote:
+                print(
+                    f"{cfg.name}: local meta.yaml missing; "
+                    "verifying against a remote copy"
+                )
+            by_profile = collect_remotes(selected)
+            for pname in selected.profiles:
+                lookup = {spec.id: (spec, remote) for spec, remote in by_profile[pname]}
+                for snap in manifest.snapshots(meta, pname):
+                    if snap.get("type") == "local":
+                        if not (cfg.dest / pname / snap["id"]).exists():
+                            print(f"MISSING local snapshot {cfg.name}/{pname}/{snap['id']}")
+                            failures += 1
+                        continue
+                    if snap.get("parent") and manifest.get_snapshot(
+                        meta, pname, snap["parent"]
+                    ) is None:
                         print(
-                            f"INCOMPLETE {cfg.name}/{pname}/{snap['id']} "
-                            f"on remote {upload.get('remote')}"
+                            f"BROKEN CHAIN {cfg.name}/{pname}/{snap['id']}: "
+                            f"parent {snap['parent']} missing"
+                        )
+                        failures += 1
+                    uploads = snap.get("uploads", [])
+                    if not uploads:
+                        print(
+                            f"INCOMPLETE {cfg.name}/{pname}/{snap['id']}: "
+                            "no uploads recorded"
                         )
                         failures += 1
                         continue
-                    if upload.get("remote") not in lookup:
-                        print(
-                            f"UNKNOWN REMOTE {cfg.name}/{pname}/{snap['id']} "
-                            f"remote {upload.get('remote')}"
-                        )
-                        failures += 1
-                        continue
-                    spec, remote = lookup[upload["remote"]]
-                    tmp = cfg.tmpdir / cfg.name / "verify" / f"{snap['id']}.send"
-                    tmp.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        remote.read(snap["file"], tmp)
-                        if util.sha256_file(tmp) != snap.get("sha256"):
+                    for upload in uploads:
+                        if upload.get("status") != "complete":
                             print(
-                                f"CORRUPT {cfg.name}/{pname}/{snap['id']} "
+                                f"INCOMPLETE {cfg.name}/{pname}/{snap['id']} "
+                                f"on remote {upload.get('remote')}"
+                            )
+                            failures += 1
+                            continue
+                        if upload.get("remote") not in lookup:
+                            print(
+                                f"UNKNOWN REMOTE {cfg.name}/{pname}/{snap['id']} "
+                                f"remote {upload.get('remote')}"
+                            )
+                            failures += 1
+                            continue
+                        spec, remote = lookup[upload["remote"]]
+                        tmp = cfg.tmpdir / cfg.name / "verify" / f"{snap['id']}.send"
+                        tmp.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            remote.read(snap["file"], tmp)
+                            if util.sha256_file(tmp) != snap.get("sha256"):
+                                print(
+                                    f"CORRUPT {cfg.name}/{pname}/{snap['id']} "
+                                    f"on remote {spec.id}"
+                                )
+                                failures += 1
+                            elif tmp.stat().st_size != snap.get("size"):
+                                print(
+                                    f"SIZE MISMATCH {cfg.name}/{pname}/{snap['id']} "
+                                    f"on remote {spec.id}"
+                                )
+                                failures += 1
+                        except RemoteNotFoundError:
+                            print(
+                                f"MISSING {cfg.name}/{pname}/{snap['id']} "
                                 f"on remote {spec.id}"
                             )
                             failures += 1
-                        elif tmp.stat().st_size != snap.get("size"):
+                        except Exception as exc:  # noqa: BLE001
                             print(
-                                f"SIZE MISMATCH {cfg.name}/{pname}/{snap['id']} "
-                                f"on remote {spec.id}"
+                                f"ERROR {cfg.name}/{pname}/{snap['id']} "
+                                f"on remote {spec.id}: {exc}"
                             )
                             failures += 1
-                    except RemoteNotFoundError:
-                        print(
-                            f"MISSING {cfg.name}/{pname}/{snap['id']} "
-                            f"on remote {spec.id}"
-                        )
-                        failures += 1
-                    except Exception as exc:  # noqa: BLE001
-                        print(
-                            f"ERROR {cfg.name}/{pname}/{snap['id']} "
-                            f"on remote {spec.id}: {exc}"
-                        )
-                        failures += 1
-                    finally:
-                        tmp.unlink(missing_ok=True)
-        if failures == 0:
-            print(f"{cfg.name}: ok")
-        total_failures += failures
+                        finally:
+                            tmp.unlink(missing_ok=True)
+            if failures == 0:
+                print(f"{cfg.name}: ok")
+            total_failures += failures
+    if args.profile and not matched:
+        raise config_mod.ConfigError(f"unknown profile: {args.profile!r}")
     return 1 if total_failures else 0
 
 
@@ -731,7 +761,11 @@ def cmd_restore(args) -> int:
     auth = config_mod.load_auth()
     path = config_mod.config_path_for_subvol(args.subvol)
     cfg = config_mod.load_config(path, auth)
-    restore_mod.run_restore(cfg, args.profile, args.snapshot_id, args.target)
+    remote_errors = config_mod.validate_remote_config(cfg, args.profile)
+    if remote_errors:
+        raise config_mod.ConfigError("\n".join(remote_errors))
+    with util.exclusive_lock(cfg.tmpdir / (cfg.name + ".lock")):
+        restore_mod.run_restore(cfg, args.profile, args.snapshot_id, args.target)
     return 0
 
 

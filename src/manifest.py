@@ -75,6 +75,8 @@ def committed(snapshot: dict) -> bool:
 
 def last_committed(meta: dict, name: str) -> dict | None:
     for snap in reversed(snapshots(meta, name)):
+        if snap.get("local_deleted"):
+            continue
         if committed(snap):
             return snap
     return None
@@ -82,6 +84,8 @@ def last_committed(meta: dict, name: str) -> dict | None:
 
 def last_full_committed(meta: dict, name: str) -> dict | None:
     for snap in reversed(snapshots(meta, name)):
+        if snap.get("local_deleted"):
+            continue
         if snap.get("type") == "full" and committed(snap):
             return snap
     return None

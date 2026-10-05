@@ -147,6 +147,20 @@ def filter_profiles(config: Config, name: str | None) -> Config:
     return replace(config, profiles={name: config.profiles[name]})
 
 
+def select_profiles(config: Config, name: str | None) -> Config | None:
+    """Return *config* restricted to profile *name*, or ``None`` when absent.
+
+    Unlike :func:`filter_profiles`, this is a tolerant selector used by CLI
+    commands that iterate over multiple config files: a config without the
+    requested profile is skipped rather than treated as an error.
+    """
+    if not name:
+        return config
+    if name not in config.profiles:
+        return None
+    return replace(config, profiles={name: config.profiles[name]})
+
+
 def _parse_profile(name, praw, auth, path) -> Profile:
     freq = praw.get("freq")
     if not isinstance(freq, dict):
@@ -219,8 +233,8 @@ def remote_identity(spec) -> str:
     Two remotes collapse to the same identity only when their non-secret
     resolved settings match. ``auth`` is excluded (it is credential material
     and is not part of endpoint identity), while ``name`` is intentionally
-    included so distinct remotes never alias each other even when they share a
-    name.
+    included so two otherwise-identical endpoints with different stable names
+    never alias each other.
     """
     settings = {k: v for k, v in spec.settings.items() if k != "auth"}
     return json.dumps(settings, sort_keys=True, default=str)
@@ -321,12 +335,36 @@ def validate(config: Config, check_remotes=True):
             )
         for recipient in config.encryption["recipients"]:
             if age_recipient_kind(recipient) == "unknown":
-                warnings.append(
+                errors.append(
                     "age recipient is neither an existing file nor an inline "
                     f"age1 key: {recipient!r}"
                 )
 
     return errors, warnings
+
+
+def validate_remote_config(config: Config, profile_name: str | None = None) -> list[str]:
+    """Return structural remote-configuration errors for *config*.
+
+    This is intentionally lighter than :func:`validate`: it does not require
+    ``src``/``dest``/``tmpdir`` to exist or be on the same filesystem, so it is
+    safe for ``verify`` and disaster-recovery ``restore`` runs. It only checks
+    that every remote spec can be instantiated (registered type, required
+    settings present).
+    """
+    errors: list[str] = []
+    profiles = config.profiles
+    if profile_name is not None:
+        if profile_name not in profiles:
+            return [f"unknown profile: {profile_name!r}"]
+        profiles = {profile_name: profiles[profile_name]}
+    for profile in profiles.values():
+        for remote in profile.remotes:
+            try:
+                create_remote(remote)
+            except Exception as exc:  # noqa: BLE001 - surface any remote error
+                errors.append(f"profile {profile.name}: remote {remote.id}: {exc}")
+    return errors
 
 
 def _nearest_existing(path: Path) -> Path | None:
@@ -340,7 +378,9 @@ def _nearest_existing(path: Path) -> Path | None:
 
 def _check_creatable(path: Path, label: str, errors: list[str]) -> None:
     if path.exists():
-        if not os.access(path, os.W_OK):
+        if not path.is_dir():
+            errors.append(f"{label} is not a directory: {path}")
+        elif not os.access(path, os.W_OK):
             errors.append(f"{label} is not writable: {path}")
     else:
         parent = _nearest_existing(path)
