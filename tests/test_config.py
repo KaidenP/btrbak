@@ -285,3 +285,29 @@ def test_remote_identity_distinguishes_settings():
     c = config.RemoteSpec("offsite", "dir", {"path": "/a"})
     assert config.remote_identity(a) != config.remote_identity(b)
     assert config.remote_identity(a) == config.remote_identity(c)
+
+
+def test_remote_identity_ignores_auth():
+    a = config.RemoteSpec("offsite", "dir", {"path": "/a", "auth": {"k": "1"}})
+    b = config.RemoteSpec("offsite", "dir", {"path": "/a", "auth": {"k": "2"}})
+    assert config.remote_identity(a) == config.remote_identity(b)
+
+
+def test_validate_warns_on_missing_age_recipient_path(tmp_path):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": str(tmp_path / "src"),
+            "dest": str(tmp_path / "dest"),
+            "encryption": {
+                "algorithm": "age",
+                "recipients": ["/nonexistent/recipients.txt"],
+            },
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        },
+    )
+    cfg = config.load_config(cfg_file, {})
+    (tmp_path / "src").mkdir()
+    _errors, warnings = config.validate(cfg, check_remotes=False)
+    assert any("age recipient file not found" in warning for warning in warnings)

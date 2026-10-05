@@ -61,7 +61,7 @@ def load_auth(path=AUTH_PATH) -> dict:
     if not path.exists():
         return {}
     try:
-        with open(path) as handle:
+        with open(path, encoding="utf-8") as handle:
             data = yaml.safe_load(handle) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"invalid YAML in {path}: {exc}")
@@ -80,7 +80,7 @@ def _parse_tmpdir(value) -> Path:
 def load_config(path, auth: dict) -> Config:
     path = Path(path)
     try:
-        with open(path) as handle:
+        with open(path, encoding="utf-8") as handle:
             data = yaml.safe_load(handle)
     except yaml.YAMLError as exc:
         raise ConfigError(f"invalid YAML in {path}: {exc}")
@@ -216,12 +216,14 @@ def _parse_remote(entry, auth, path, profile) -> RemoteSpec:
 def remote_identity(spec) -> str:
     """Return a stable identity for a remote endpoint.
 
-    Two remotes collapse to the same identity only when their full resolved
-    settings match. The ``name`` (a stable manifest id) is intentionally
+    Two remotes collapse to the same identity only when their non-secret
+    resolved settings match. ``auth`` is excluded (it is credential material
+    and is not part of endpoint identity), while ``name`` is intentionally
     included so distinct remotes never alias each other even when they share a
     name.
     """
-    return json.dumps(spec.settings, sort_keys=True, default=str)
+    settings = {k: v for k, v in spec.settings.items() if k != "auth"}
+    return json.dumps(settings, sort_keys=True, default=str)
 
 
 def _normalize_compression(compression, path) -> dict | None:
@@ -317,6 +319,9 @@ def validate(config: Config, check_remotes=True):
             _check_permissions(
                 config.encryption["identity"], "age identity file", warnings
             )
+        for recipient in config.encryption["recipients"]:
+            if ("\\" in recipient or "/" in recipient) and not Path(recipient).exists():
+                warnings.append(f"age recipient file not found: {recipient}")
 
     return errors, warnings
 

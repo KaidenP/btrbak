@@ -48,6 +48,19 @@ def test_first_run_creates_full():
     assert (due, stype, parent) == (True, "full", None)
 
 
+def test_first_run_creates_full_when_full_never_but_incr_auto():
+    profile = _profile("daily", -1, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    cfg = _cfg({"daily": profile})
+    due, stype, parent = cli.compute_plan(cfg, profile, {"profiles": {"daily": {"snapshots": []}}}, 5000)
+    assert (due, stype, parent) == (True, "full", None)
+
+
+def test_manual_remote_profile_not_due_on_first_run():
+    profile = _profile("manual", -1, -1, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    cfg = _cfg({"manual": profile})
+    assert cli.compute_plan(cfg, profile, {"profiles": {"manual": {"snapshots": []}}}, 5000) == (False, None, None)
+
+
 def test_full_due_after_window():
     profile = _profile("daily", 100, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
     cfg = _cfg({"daily": profile})
@@ -173,7 +186,7 @@ def test_reconcile_uploads_dedupes():
         {"remote": "r", "status": "complete"},
     ]}
     cli.reconcile_uploads(snap, {"r"})
-    assert snap["uploads"] == [{"remote": "r", "status": "failed"}]
+    assert snap["uploads"] == [{"remote": "r", "status": "complete"}]
 
 
 def test_reconcile_uploads_noop_when_current():

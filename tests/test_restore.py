@@ -1,32 +1,37 @@
 import pytest
+from types import SimpleNamespace
 
 import restore
 
 
+def _config(compression=None, encryption=None):
+    return SimpleNamespace(compression=compression, encryption=encryption)
+
+
 def test_codec_prefers_snapshot_settings():
-    profile_meta = {"compression": {"algorithm": "xz", "level": 9}, "encryption": None}
+    config = _config(compression={"algorithm": "xz", "level": 9})
     snap = {
         "compression": {"algorithm": "xz", "level": 6},
         "encryption": {"algorithm": "age", "recipients": ["age1abc"], "identity": "/key"},
     }
-    assert restore.codec_for_snapshot(snap, profile_meta) == (
+    assert restore.codec_for_snapshot(snap, config) == (
         {"algorithm": "xz", "level": 6},
         {"algorithm": "age", "recipients": ["age1abc"], "identity": "/key"},
     )
 
 
-def test_codec_falls_back_to_profile_when_snapshot_has_no_key():
-    profile_meta = {"compression": {"algorithm": "xz", "level": 6}, "encryption": None}
-    assert restore.codec_for_snapshot({}, profile_meta) == (
+def test_codec_falls_back_to_config_when_snapshot_has_no_key():
+    config = _config(compression={"algorithm": "xz", "level": 6})
+    assert restore.codec_for_snapshot({}, config) == (
         {"algorithm": "xz", "level": 6},
         None,
     )
 
 
 def test_codec_explicit_null_is_not_fallback():
-    profile_meta = {"compression": {"algorithm": "xz", "level": 6}, "encryption": None}
+    config = _config(compression={"algorithm": "xz", "level": 6})
     snap = {"compression": None, "encryption": None}
-    assert restore.codec_for_snapshot(snap, profile_meta) == (None, None)
+    assert restore.codec_for_snapshot(snap, config) == (None, None)
 
 
 def test_build_chain_root_to_target():

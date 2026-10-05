@@ -135,6 +135,18 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
                 )
             else:
                 print(f"[dry-run] {selected.name}/{pname}: nothing due")
+
+        seen = set()
+        for profile in selected.profiles.values():
+            for spec in profile.remotes:
+                key = config_mod.remote_identity(spec)
+                if key not in seen:
+                    seen.add(key)
+                    print(f"[dry-run] would sync config.yaml to remote {spec.id}")
+
+        for pname, profile in selected.profiles.items():
+            for sid in retention.plan_prune(meta, pname, profile.keep, util.now()):
+                print(f"[dry-run] {selected.name}/{pname}: would prune snapshot {sid}")
         return 0
 
     selected.dest.mkdir(parents=True, exist_ok=True)
@@ -180,8 +192,15 @@ def compute_plan(cfg, profile, meta, now_ts, force=False, full=False):
         return False, None, None
 
     last_full = manifest.last_full_committed(meta, pname)
-    full_due = (not timespan.is_never(profile.freq_full)) and (
-        last_full is None or now_ts - last_full["created"] >= profile.freq_full
+    has_auto = (not timespan.is_never(profile.freq_full)) or (
+        not timespan.is_never(profile.freq_incr)
+    )
+    full_due = (
+        (last is None and has_auto)
+        or (
+            (not timespan.is_never(profile.freq_full))
+            and (last_full is None or now_ts - last_full["created"] >= profile.freq_full)
+        )
     )
     incr_due = (
         (not timespan.is_never(profile.freq_incr))
@@ -351,16 +370,25 @@ def reconcile_uploads(snap, current_ids) -> None:
 
     Removing a remote must not strand a snapshot in an uncommitted state;
     prune stale upload records so the snapshot can be retried against (or
-    committed by) the remotes that remain.
+    committed by) the remotes that remain. When duplicate records exist for a
+    remote, keep the most favourable (``complete``) status.
     """
     uploads = snap.get("uploads", [])
-    seen = set()
-    kept = []
+    best = {}
+    order = []
     for upload in uploads:
         remote_id = upload.get("remote")
-        if remote_id in current_ids and remote_id not in seen:
-            seen.add(remote_id)
-            kept.append(upload)
+        if remote_id not in current_ids:
+            continue
+        if remote_id not in best:
+            best[remote_id] = upload
+            order.append(remote_id)
+        elif (
+            upload.get("status") == "complete"
+            and best[remote_id].get("status") != "complete"
+        ):
+            best[remote_id] = upload
+    kept = [best[rid] for rid in order]
     if kept != uploads:
         snap["uploads"] = kept
 
@@ -370,6 +398,9 @@ def prune(cfg, meta, by_profile) -> None:
     for pname, profile in cfg.profiles.items():
         for sid in retention.plan_prune(meta, pname, profile.keep, now_ts):
             snap = manifest.get_snapshot(meta, pname, sid)
+            snap_path = cfg.dest / pname / sid
+            if snap_path.exists():
+                snapshot.delete_snapshot(snap_path)
             delete_ok = True
             if snap and snap.get("file"):
                 for spec, remote in by_profile.get(pname, []):
@@ -381,12 +412,10 @@ def prune(cfg, meta, by_profile) -> None:
                         print(f"remote delete on {spec.id} failed: {exc}", file=sys.stderr)
                         delete_ok = False
             if not delete_ok:
-                # Stop before removing this snapshot (and its ancestors): a
-                # failed remote delete must not orphan a dependent chain.
+                # Keep the snapshot in the manifest so the remote delete is
+                # retried on the next run. The local subvolume is already gone,
+                # which is harmless: the offsite copy remains restorable.
                 break
-            snap_path = cfg.dest / pname / sid
-            if snap_path.exists():
-                snapshot.delete_snapshot(snap_path)
             manifest.remove_snapshot(meta, pname, sid)
 
 

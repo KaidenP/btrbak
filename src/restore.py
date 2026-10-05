@@ -34,16 +34,16 @@ def pick_remote(snapshot: dict, remote_map: dict):
     return None
 
 
-def codec_for_snapshot(snap: dict, profile_meta: dict) -> tuple:
+def codec_for_snapshot(snap: dict, config) -> tuple:
     """Return the ``(compression, encryption)`` settings for a snapshot.
 
     Prefers the snapshot's own recorded settings and falls back to the
-    profile-level values for manifests written before per-snapshot codec
-    storage was introduced.
+    profile-level values from the config file for manifests written before
+    per-snapshot codec storage was introduced.
     """
     return (
-        snap.get("compression", profile_meta.get("compression")),
-        snap.get("encryption", profile_meta.get("encryption")),
+        snap.get("compression", config.compression),
+        snap.get("encryption", config.encryption),
     )
 
 
@@ -59,7 +59,6 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
         raise BtrbakError(f"snapshot not found: {profile_name}/{snapshot_id}")
 
     chain = build_chain(meta, profile_name, snapshot_id)
-    profile_meta = manifest.profile(meta, profile_name)
     remote_map = {
         spec.id: create_remote(spec) for spec in config.profiles[profile_name].remotes
     }
@@ -75,7 +74,7 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
         if remote is None:
             raise BtrbakError(f"no complete remote upload for snapshot {sid}")
 
-        compression, encryption = codec_for_snapshot(snap, profile_meta)
+        compression, encryption = codec_for_snapshot(snap, config)
         tmpfile = tmpdir / f"{sid}.send"
         try:
             remote.read(snap["file"], tmpfile)

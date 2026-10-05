@@ -18,7 +18,7 @@ def load(path) -> dict:
     if not path.exists():
         return default()
     try:
-        with open(path) as handle:
+        with open(path, encoding="utf-8") as handle:
             data = yaml.safe_load(handle) or {}
     except yaml.YAMLError as exc:
         raise BtrbakError(f"invalid meta.yaml: {exc}")

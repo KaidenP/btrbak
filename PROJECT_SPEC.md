@@ -107,7 +107,7 @@ btrbak/
     ├── test_retention.py
     ├── test_manifest.py
     └── integration/
-        └── test_end_to_end.py    # runs against a btrfs loopback image
+        └── test_btrfs.py        # runs against a btrfs loopback image
 ```
 
 Remote modules live in `src/remotes` as required. A future remote (e.g. `s3`)
@@ -369,10 +369,13 @@ Per config file:
 
 Due rules (times measured against **committed** backups only):
 
-- `freq.full = -1` → full backups are never due automatically.
+- `freq.full = -1` → *scheduled* full backups are never due automatically.
 - `freq.incr = -1` → incremental backups are never due automatically.
-- `full_due` = (`freq.full != -1`) and (no full exists, or
-  `now − last_full.created ≥ freq.full`).
+- `full_due` = (the profile has no committed backup and at least one of
+  `freq.full`/`freq.incr` is not `-1`) **or** ((`freq.full != -1`) and
+  (no full exists, or `now − last_full.created ≥ freq.full`)).
+  The first clause bootstraps the dependency chain: an automatically-scheduled
+  profile always creates its root full on first run, even when `freq.full = -1`.
 - `incr_due` = (`freq.incr != -1`) and (not `full_due`) and
   `now − last_backup.created ≥ freq.incr` (where `last_backup` is the most
   recent committed full **or** incremental).

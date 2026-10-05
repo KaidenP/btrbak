@@ -87,7 +87,7 @@ def atomic_write_text(path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
@@ -144,7 +144,7 @@ def _mount_point(path: Path) -> Path:
     path = Path(path).resolve()
     best = None
     try:
-        with open("/proc/self/mounts") as handle:
+        with open("/proc/self/mounts", encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 parts = line.split()
                 if len(parts) < 2:
