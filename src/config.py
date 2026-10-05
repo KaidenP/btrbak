@@ -14,7 +14,7 @@ import yaml
 
 import timespan
 from remotes import create_remote
-from util import is_nested, is_subvolume, same_device, which
+from util import age_recipient_kind, is_nested, is_subvolume, same_device, which
 
 CONFIG_DIR = Path("/etc/btrbak/profiles.d")
 AUTH_PATH = Path("/etc/btrbak/auth.yaml")
@@ -320,8 +320,11 @@ def validate(config: Config, check_remotes=True):
                 config.encryption["identity"], "age identity file", warnings
             )
         for recipient in config.encryption["recipients"]:
-            if ("\\" in recipient or "/" in recipient) and not Path(recipient).exists():
-                warnings.append(f"age recipient file not found: {recipient}")
+            if age_recipient_kind(recipient) == "unknown":
+                warnings.append(
+                    "age recipient is neither an existing file nor an inline "
+                    f"age1 key: {recipient!r}"
+                )
 
     return errors, warnings
 

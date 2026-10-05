@@ -310,4 +310,4 @@ def test_validate_warns_on_missing_age_recipient_path(tmp_path):
     cfg = config.load_config(cfg_file, {})
     (tmp_path / "src").mkdir()
     _errors, warnings = config.validate(cfg, check_remotes=False)
-    assert any("age recipient file not found" in warning for warning in warnings)
+    assert any("age recipient is neither an existing file" in warning for warning in warnings)

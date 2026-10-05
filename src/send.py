@@ -9,7 +9,7 @@ import os
 import shutil
 from pathlib import Path
 
-from util import BtrbakError, run
+from util import BtrbakError, age_recipient_kind, run
 
 
 def _use_xz(compression) -> bool:
@@ -72,11 +72,16 @@ def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None)
         if use_age:
             age_cmd = ["age"]
             for recipient in encryption["recipients"]:
-                recipient = str(recipient)
-                if os.path.exists(recipient):
-                    age_cmd += ["-R", recipient]
+                kind = age_recipient_kind(recipient)
+                if kind == "file":
+                    age_cmd += ["-R", str(recipient)]
+                elif kind == "key":
+                    age_cmd += ["-r", str(recipient)]
                 else:
-                    age_cmd += ["-r", recipient]
+                    raise BtrbakError(
+                        "age recipient is neither an existing file nor an "
+                        f"inline age1 key: {recipient!r}"
+                    )
             age_cmd += ["-o", str(out_path), str(current)]
             run(age_cmd)
         else:

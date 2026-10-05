@@ -34,9 +34,7 @@ def run(cmd, stdout=None, stdin=None, check=True) -> subprocess.CompletedProcess
         raise BtrbakError(f"required command not found: {cmd[0]}") from exc
     if check and proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", "replace") if proc.stderr else ""
-        raise BtrbakError(
-            f"command failed ({proc.returncode}): {' '.join(map(str, cmd))}\n{stderr}"
-        )
+        raise BtrbakError(f"command failed ({proc.returncode}): {cmd[0]}\n{stderr}")
     return proc
 
 
@@ -194,3 +192,18 @@ def is_subvolume(path) -> bool:
 def which(binary) -> bool:
     """Return True when *binary* is on PATH."""
     return shutil.which(binary) is not None
+
+
+def age_recipient_kind(recipient) -> str:
+    """Classify an age recipient as ``"file"``, ``"key"``, or ``"unknown"``.
+
+    An existing filesystem path is a recipients file (``age -R``); an ``age1``
+    string is an inline public key (``age -r``). Anything else is unknown and
+    should be surfaced to the user rather than passed blindly to ``age``.
+    """
+    recipient = str(recipient)
+    if os.path.exists(recipient):
+        return "file"
+    if recipient.startswith("age1"):
+        return "key"
+    return "unknown"
