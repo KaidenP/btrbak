@@ -31,7 +31,7 @@ incremental offsite backups via `btrfs send`.
   only deleting snapshots/backups that nothing depends on.
 - Configure everything via YAML profile files.
 - Keep the remote/offsite layer pluggable so future backends (`s3`, `sftp`,
-  `rclone`, …) can be added as modules under `src/remotes`.
+  `rclone`, …) can be added as modules under `src/btrbak/remotes`.
 
 ## 3. Non-goals (v1)
 
@@ -88,19 +88,21 @@ btrbak/
 ├── README.md
 ├── PROJECT_SPEC.md
 ├── src/
-│   ├── cli.py                # argument parsing, root check, dispatch
-│   ├── config.py             # profile + auth.yaml loading/validation
-│   ├── timespan.py           # "1d", "2w", "1mo" parsing
-│   ├── snapshot.py           # create/delete ro snapshots
-│   ├── send.py               # btrfs send + compress/encrypt pipeline
-│   ├── manifest.py           # meta.yaml read/write/atomic update
-│   ├── retention.py          # dependency-aware pruning
-│   ├── restore.py            # chain replay via btrfs receive
-│   ├── util.py               # checksum, locking, subprocess, fs helpers
-│   └── remotes/
-│       ├── __init__.py       # remote registry (type string → class)
-│       ├── base.py           # Remote abstract base class
-│       └── dir.py            # DirRemote (local filesystem path)
+│   └── btrbak/
+│       ├── __init__.py
+│       ├── cli.py            # argument parsing, root check, dispatch
+│       ├── config.py         # profile + auth.yaml loading/validation
+│       ├── timespan.py       # "1d", "2w", "1mo" parsing
+│       ├── snapshot.py       # create/delete ro snapshots
+│       ├── send.py           # btrfs send + compress/encrypt pipeline
+│       ├── manifest.py       # meta.yaml read/write/atomic update
+│       ├── retention.py      # dependency-aware pruning
+│       ├── restore.py        # chain replay via btrfs receive
+│       ├── util.py           # checksum, locking, subprocess, fs helpers
+│       └── remotes/
+│           ├── __init__.py   # remote registry (type string → class)
+│           ├── base.py       # Remote abstract base class
+│           └── dir.py        # DirRemote (local filesystem path)
 └── tests/
     ├── test_timespan.py
     ├── test_config.py
@@ -110,8 +112,14 @@ btrbak/
         └── test_btrfs.py        # runs against a btrfs loopback image
 ```
 
-Remote modules live in `src/remotes` as required. A future remote (e.g. `s3`)
-adds `src/remotes/s3.py` and registers a `type` string in `src/remotes/__init__.py`.
+Modules live under the `btrbak` package and import each other relatively, so
+an installed copy occupies a single `btrbak/` directory in `site-packages`
+instead of dropping generically-named top-level modules (`cli`, `config`,
+`manifest`, `remotes`, …) where they would shadow unrelated projects.
+
+Remote modules live in `src/btrbak/remotes` as required. A future remote (e.g.
+`s3`) adds `src/btrbak/remotes/s3.py` and registers a `type` string in
+`src/btrbak/remotes/__init__.py`.
 
 ---
 
@@ -128,7 +136,11 @@ or `.yml`; when both exist for the same stem, `.yaml` takes precedence.
 `src`, `dest` and `tmpdir` **must be absolute paths**. They are resolved once,
 at load time, rather than against the process working directory, so behaviour
 does not depend on where the tool happened to be invoked from (a systemd unit's
-`WorkingDirectory`). `~` is expanded.
+`WorkingDirectory`). `~` is expanded. For the same reason an `age` recipient
+that names a recipients *file*, and `encryption.identity`, must be absolute:
+they are handed straight to `age -R` / `age -d -i`, so a relative path would
+resolve against the caller's working directory. Inline `age1...` keys are
+unaffected.
 
 Profile names become path components — `<dest>/<profile>/<snapshot-id>` locally
 and `<profile>/<snapshot-id>.send` on every remote — so they are restricted to
@@ -148,8 +160,8 @@ compression:                        # optional; omit for no compression
 encryption:                         # optional; omit for no encryption
   algorithm: age                    # v1: age (only; future: gpg, none)
   recipients:                       # required when encryption enabled
-    - age1qxy...                    # inline age public key, or a path to a recipients file (one key per line)
-  identity: /root/.config/age/btrbak.key   # optional; private key path, required for restore
+    - age1qxy...                    # inline age public key, or an ABSOLUTE path to a recipients file (one key per line)
+  identity: /root/.config/age/btrbak.key   # optional; private key path, required for restore; absolute
 
 profiles:                           # required; at least one
   daily:
@@ -330,6 +342,7 @@ profiles:
         created: 1760000000      # unix epoch seconds (snapshot creation time)
         type: full               # full | incr | local (local-only)
         parent: null             # snapshot id of the send parent (null for full)
+        uuid: 32fce6b5-1603-f54d-a7d8-db6135d2316f   # subvolume UUID of the snapshot (see below)
         compression: { algorithm: xz, level: 6 }   # null when uncompressed
         encryption: { algorithm: age, recipients: [age1qxy...], identity: /root/.config/age/btrbak.key }  # null when unencrypted
         file: "daily/20251004T154300Z.send"   # logical remote path
@@ -342,6 +355,7 @@ profiles:
         created: 1760086200
         type: incr
         parent: "20251004T154300Z"
+        uuid: 9e09b6b7-f032-9616-1b1e-4dbd86f8ed19
         compression: { algorithm: xz, level: 6 }
         encryption: { algorithm: age, recipients: [age1qxy...], identity: /root/.config/age/btrbak.key }
         file: "daily/20251005T154300Z.send"
@@ -356,6 +370,14 @@ Each snapshot records the `compression` and `encryption` settings used to
 produce its send file (both null for a local-only snapshot, which has no send
 file). Restore reads these per-snapshot settings so a later config change never
 changes how an existing backup is decoded.
+
+Each snapshot also records `uuid`: the identity btrfs carries for that
+subvolume in a `btrfs send` stream. A local snapshot reports it as the
+subvolume's own `UUID`; a copy recovered by `btrfs receive` gets a freshly
+assigned `UUID` of its own and keeps the sent one as `Received UUID`. `restore`
+compares it to decide whether a link already present in the target is genuinely
+one it received (§10.1). The field is optional: a manifest written before it
+existed has no `uuid` and `restore` falls back to the name-only check.
 
 A snapshot is **committed** when every configured remote has a complete
 `uploads[].status == complete` record. A local-only snapshot has no uploads
@@ -442,14 +464,16 @@ Due rules (times measured against **committed** backups only):
 
 - `freq.full = -1` → *scheduled* full backups are never due automatically.
 - `freq.incr = -1` → incremental backups are never due automatically.
-- `full_due` = (the profile has no committed backup and at least one of
-  `freq.full`/`freq.incr` is not `-1`) **or** ((`freq.full != -1`) and
-  (no full exists, or `now − last_full.created ≥ freq.full`)).
+- `full_due` = (the profile has no committed backup **that has an offsite
+  copy** and at least one of `freq.full`/`freq.incr` is not `-1`) **or**
+  ((`freq.full != -1`) and (no full exists, or
+  `now − last_full.created ≥ freq.full`)).
   The first clause bootstraps the dependency chain: an automatically-scheduled
-  profile always creates its root full on first run, even when `freq.full = -1`.
+  profile always creates its root full on first run, even when
+  `freq.full = -1`.
 - `incr_due` = (`freq.incr != -1`) and (not `full_due`) and
-  `now − last_backup.created ≥ freq.incr` (where `last_backup` is the most
-  recent committed full **or** incremental).
+  (`now − last_backup.created ≥ freq.incr`) (where `last_backup` is the most
+  recent committed full **or** incremental that has an offsite copy).
 - If neither is due and `--force` is not set → skip creation.
 
 When creating:
@@ -457,11 +481,21 @@ When creating:
 1. Pick type:
    - `full` if `--full` is passed;
    - else `full` if `full_due`;
-   - else `full` if the profile has no committed backup yet (a chain needs a
-     root, e.g. the first manual run);
+   - else `full` if the profile has no committed offsite backup yet (a chain
+     needs a root, e.g. the first manual run);
    - else `incr`.
    A local-only profile (no remotes) records `type: local` instead.
-   Parent (for `incr`) = the most recent committed backup in the profile.
+   Parent (for `incr`) = the most recent committed **offsite** backup in the
+   profile.
+
+The parent lookup deliberately ignores snapshots that are committed but have
+no send file — `type: local` entries, and entries whose remotes were all
+removed (recorded `committed: true` with no `file`). Parenting an incremental
+onto one of those produces a chain whose root can never be received offsite,
+so `restore` would reject it forever with no way to repair the chain. The
+common case is a profile that gains `remotes:` after a period of local-only
+snapshotting: it gets a fresh full root rather than an `incr` hanging off a
+local snapshot.
 2. Create snapshot:
    `btrfs subvolume snapshot -r <src> <dest>/<profile>/<snapshot-id>`.
 3. If the profile has remotes:
@@ -501,6 +535,11 @@ snapshot:
 3. Remove the entry from `meta.yaml` and rewrite it locally. Once pruning
    completes, re-upload `meta.yaml` to every remote; if pruning aborts, the
    local manifest is still persisted so it never refers to deleted subvolumes.
+
+Every `meta.yaml` upload is best-effort: the local copy is authoritative and
+the remote copy is refreshed on the next run, so a remote that is briefly
+unreachable produces a warning rather than failing a run whose snapshots and
+send files already landed.
 
 If a remote `delete` fails after the local subvolume was removed, the entry is
 kept in `meta.yaml` and marked `local_deleted: true` (see §8) so the remote
@@ -556,11 +595,22 @@ restore completes instead of failing with `creating subvolume … File exists`.
 
 The resume point is the index of the first link in the chain that is not
 present in `TARGET`. A link counts as present only when it is a real btrfs
-subvolume; if `TARGET` holds a non-subvolume entry (an empty directory, say)
-under a snapshot id, the restore stops with an explicit error rather than
-letting `btrfs receive` fail cryptically. Because snapshot ids are per profile,
-restoring two profiles that produced the same id into one target is rejected by
-that check — use separate targets.
+subvolume **and** its UUID matches the one `meta.yaml` recorded for that
+snapshot id (§8). A same-named subvolume that belongs to something else is
+rejected rather than skipped — otherwise the remaining links would be replayed
+on top of the wrong base and the restore would exit 0 holding incorrect data.
+A link occupied by a non-subvolume entry (an empty directory, say) is likewise
+rejected with an explicit error rather than letting `btrfs receive` fail
+cryptically. Manifests predating the `uuid` field have nothing to compare
+against and fall back to the name-only check.
+
+Because snapshot ids are per profile, restoring two profiles that produced the
+same id into one target is rejected by that check — use separate targets.
+
+Matching the UUID also means a half-received link can never be mistaken for a
+finished one: `btrfs receive` builds each stream into a temporary subvolume and
+moves it into place only on success, so an interrupted receive leaves nothing
+at the snapshot id to match.
 
 Only a contiguous prefix is resumed. A gap (link 1 restored, link 3 restored,
 link 2 missing) is not repaired automatically, because skipping a parent would
@@ -596,7 +646,7 @@ Notes:
 
 ## 11. Remote interface
 
-Location: `src/remotes/base.py`. `btrbak` owns all logical paths; remotes map
+Location: `src/btrbak/remotes/base.py`. `btrbak` owns all logical paths; remotes map
 them to their backing store. Logical paths used by btrbak:
 
 - `meta.yaml`
@@ -620,7 +670,7 @@ class Remote(ABC):
     # idempotent delete; missing file is not an error
 ```
 
-`src/remotes/dir.py` — `DirRemote`:
+`src/btrbak/remotes/dir.py` — `DirRemote`:
 
 - `type: dir`
 - required setting: `path` (the remote root directory).
@@ -628,7 +678,7 @@ class Remote(ABC):
 - `write` creates parent directories and writes to a temp file then `os.replace`
   (atomic); `read`/`delete` are direct filesystem operations.
 
-Registry: `src/remotes/__init__.py` maps `type` string → class, e.g.
+Registry: `src/btrbak/remotes/__init__.py` maps `type` string → class, e.g.
 `{"dir": DirRemote}`. Adding a remote = new module + one registry entry.
 
 Errors: all remote failures raise `RemoteError` (defined in `base.py`); callers
@@ -661,6 +711,14 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 - Root check: if `os.geteuid() != 0`, print an error and exit `1` before doing
   anything.
 - `run` is the main entrypoint used by the external timer.
+- Config discovery is per-file tolerant: a profile file that fails to parse is
+  reported under its own name and the remaining files are still processed, so
+  `config check` lists every outstanding problem in one pass and a single typo
+  in one profile does not silently stop a timer-driven `run` for every other
+  subvolume. Discovery itself (missing `/etc/btrbak/profiles.d`, no config
+  files, unknown `SUBVOL`) remains fatal. `config check` reports a failed load
+  under the file's stem; `run`, `list` and `verify` print it to stderr and exit
+  `2` once the other configs are done.
 - `--force-config` allows overwriting a differing remote `config.yaml` (§9).
 - `--full` forces a full (parentless) backup and implies `--force`. For
   local-only profiles it has no effect (use `--force` to trigger a manual
@@ -669,17 +727,23 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   `btrbak run SUBVOL PROFILE --force` (e.g. from an apt hook).
 - `verify` checks every remote file against the manifest (existence, size,
   `sha256`) and that the dependency chain is intact; reports drift/failures.
-  When the local `<dest>/meta.yaml` is missing, `verify` falls back to a copy
-  downloaded from a configured remote; if no manifest is available locally or
-  on any remote, it reports an error. Like `run` and `list`, `verify` iterates
-  **every** matching config: a broken remote definition in one config is
-  reported to stderr and the remaining configs are still verified. Exit `2`
-  wins over `1` when both occur, since a config error is the more fundamental
-  failure.
+  A parent that exists but can never be received — local-only, or with no
+  complete upload — is reported as `BROKEN CHAIN`, mirroring what `restore`
+  itself enforces, so a chain that cannot be restored does not verify as
+  `ok`. When the local `<dest>/meta.yaml` is missing, `verify` falls back to a
+  copy downloaded from a configured remote; if no manifest is available locally
+  or on any remote, it reports an error. Like `run` and `list`, `verify`
+  iterates **every** matching config: a config that fails to load, or a broken
+  remote definition in one config, is reported to stderr and the remaining
+  configs are still verified. Exit `2` wins over `1` when both occur, since a
+  config error is the more fundamental failure.
 - `list` shows each profile's snapshots: id, age, type, parent, upload status,
   and a compact dependency tree, indented by dependency depth and headed with a
-  snapshot count. When the local manifest is missing, `list` says so on stderr
-  rather than silently printing nothing.
+  snapshot count. Depth is computed iteratively, so a long chain listed
+  newest-first (which is what a hand-edited or re-sorted `meta.yaml` looks
+  like) is rendered rather than overflowing the stack; a missing or cyclic
+  parent simply settles at the depth reached. When the local manifest is
+  missing, `list` says so on stderr rather than silently printing nothing.
 - Exit codes: `0` success; `1` runtime error (including a differing remote
   `config.yaml` that is not overwritten); `2` config/validation error.
 - Logging to stderr (levels via `-v`); never log secrets or auth values, and
@@ -703,12 +767,19 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 - Per-config `flock` prevents overlapping runs. `verify` and `restore` take a
   separate advisory `flock` under `<tmpdir>/<SUBVOL>.lock` to serialize their
   staging-directory use; they intentionally do not require the `dest` lock so
-  disaster-recovery restores work when `dest` is absent or read-only.
+  disaster-recovery restores work when `dest` is absent or read-only. Both
+  stage their downloads in a scratch directory under `tmpdir` and remove it
+  again when it is left empty, so repeated invocations do not accumulate
+  directories.
 - `run` reaps stale staging files under `<tmpdir>/<SUBVOL>/` while holding that
   same `<tmpdir>/<SUBVOL>.lock`, so a long-running restore can never have its
   staging directory swept out from under it. The lock is taken
   **non-blockingly**: a restore in progress skips the sweep (logged at `-v`)
   and the backup proceeds normally.
+- Staging directories (`<tmpdir>/<SUBVOL>/`, and the `verify`/`restore`
+  subdirectories within it) are removed again once they are left empty, so
+  repeated runs do not accumulate them. A directory still holding files from an
+  interrupted run is left in place.
 - Profile names are validated as path components (§6.1), so no config can make
   snapshots or remote objects land outside `dest` / the remote root.
 - `src`, `dest` and `tmpdir` must be absolute (§6.1), so behaviour never
@@ -743,22 +814,27 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 ## 15. Testing
 
 - Unit: timespan parsing, config validation (including profile-name and
-  absolute-path enforcement), retention/dependency algorithm, manifest
-  read/write and structural validation, remote path mapping, stable remote-id
-  derivation, age recipient classification/validation.
+  absolute-path enforcement, and absolute `age` recipient/identity paths),
+  retention/dependency algorithm, manifest read/write and structural
+  validation, remote path mapping, stable remote-id derivation, age recipient
+  classification/validation.
 - Integration (pytest): create a btrfs loopback image, mount it, and exercise
   the full `run` pipeline — snapshot → send → upload → manifest → prune →
   restore — for full and incremental chains, asserting restored content and
   that dependency-preserving pruning never orphans an incremental. Also covers
-  resuming a restore that was interrupted mid-chain, and rejection of a
-  non-subvolume entry occupying a snapshot id in the target.
+  resuming a restore that was interrupted mid-chain, re-running a restore over
+  an already-received link, rejecting a non-subvolume entry occupying a
+  snapshot id in the target, and rejecting a same-named decoy subvolume.
 - CLI: root-check, exit-code mapping for every error class, arg parsing (`-v`
   before and after the subcommand), `--dry-run` acquires no lock and writes
-  nothing, dry-run `config.yaml` sync reporting for missing/in-sync/differing
-  remotes, `verify` covering ok/corrupt/size-mismatch/missing/broken-chain/
+  nothing (including no staging directory), dry-run `config.yaml` sync
+  reporting for missing/in-sync/differing remotes, `verify` covering
+  ok/corrupt/size-mismatch/missing/broken-chain/unrestorable-parent/
   incomplete/unknown-remote plus its continuation across configs, `list`
-  snapshot counts and missing-manifest warning, `config check` reporting, and
-  the staging-directory lock being skipped rather than fatal when held.
+  snapshot counts, dependency-depth rendering for a deep out-of-order chain,
+  and missing-manifest warning, `config check` reporting every broken profile
+  file rather than stopping at the first, and the staging-directory lock being
+  skipped rather than fatal when held.
 
 ---
 
@@ -775,3 +851,7 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 - Remote-side `btrfs receive` (live btrfs target) as an alternative remote type.
 - Remote orphan reconciliation (a `Remote.list` primitive) so `verify` can
   report files present on a remote but missing from the manifest.
+- Recording enough per-snapshot identity to detect a chain whose links belong
+  to different sources (the `uuid` check proves each link individually, but a
+  full provenance record per snapshot would make a spliced chain detectable up
+  front).

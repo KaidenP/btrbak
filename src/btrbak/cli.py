@@ -218,9 +218,6 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
         for pname, profile in selected.profiles.items():
             for sid in retention.plan_prune(meta, pname, profile.keep, now_ts):
                 print(f"[dry-run] {selected.name}/{pname}: would prune snapshot {sid}")
-        # The sync check above staged its download under the staging root;
-        # leave nothing behind, since --dry-run writes no other state.
-        util.rmdir_quiet(selected.tmpdir / selected.name)
         return 0
 
     selected.dest.mkdir(parents=True, exist_ok=True)
@@ -594,21 +591,23 @@ def _config_sync_state(remote, local_bytes, tmp) -> str:
 
 def sync_settings(cfg, remotes, force_config) -> None:
     local_bytes = cfg.path.read_bytes()
-    for spec, remote in remotes:
-        tmp = cfg.tmpdir / cfg.name / "config.yaml.check"
-        tmp.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            state = _config_sync_state(remote, local_bytes, tmp)
-        finally:
-            tmp.unlink(missing_ok=True)
+    # scratch_dir removes the staging root again once the comparison file is
+    # gone, so a run does not leave an empty directory behind in tmpdir.
+    with util.scratch_dir(cfg.tmpdir / cfg.name) as staging:
+        for spec, remote in remotes:
+            tmp = staging / "config.yaml.check"
+            try:
+                state = _config_sync_state(remote, local_bytes, tmp)
+            finally:
+                tmp.unlink(missing_ok=True)
 
-        if state == "missing" or (state == "differs" and force_config):
-            remote.write(cfg.path, "config.yaml")
-        elif state == "differs":
-            raise util.BtrbakError(
-                f"remote {spec.id} already has a different config.yaml; "
-                "use --force-config to overwrite"
-            )
+            if state == "missing" or (state == "differs" and force_config):
+                remote.write(cfg.path, "config.yaml")
+            elif state == "differs":
+                raise util.BtrbakError(
+                    f"remote {spec.id} already has a different config.yaml; "
+                    "use --force-config to overwrite"
+                )
 
 
 def dry_run_config_sync(cfg, by_profile, force_config) -> None:
@@ -616,36 +615,37 @@ def dry_run_config_sync(cfg, by_profile, force_config) -> None:
 
     This is the only remote access ``--dry-run`` performs and it is strictly
     read-only: the downloaded copy is staged in a temp file that is removed
-    again immediately. Reporting the real state matters because a differing
-    remote ``config.yaml`` aborts a real run unless ``--force-config`` is given.
+    again immediately, along with the directory holding it, so a dry run writes
+    nothing at all. Reporting the real state matters because a differing remote
+    ``config.yaml`` aborts a real run unless ``--force-config`` is given.
     """
     local_bytes = cfg.path.read_bytes()
-    for spec, remote in unique_remotes(by_profile):
-        tmp = cfg.tmpdir / cfg.name / "config.yaml.dry-run"
-        tmp.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            state = _config_sync_state(remote, local_bytes, tmp)
-        except Exception as exc:  # noqa: BLE001 - a dry run must not fail hard
-            print(
-                f"[dry-run] could not read config.yaml from remote {spec.id}: {exc}",
-                file=sys.stderr,
-            )
-            continue
-        finally:
-            tmp.unlink(missing_ok=True)
+    with util.scratch_dir(cfg.tmpdir / cfg.name) as staging:
+        tmp = staging / "config.yaml.dry-run"
+        for spec, remote in unique_remotes(by_profile):
+            try:
+                state = _config_sync_state(remote, local_bytes, tmp)
+            except Exception as exc:  # noqa: BLE001 - a dry run must not fail hard
+                print(
+                    f"[dry-run] could not read config.yaml from remote {spec.id}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            finally:
+                tmp.unlink(missing_ok=True)
 
-        if state == "missing":
-            print(f"[dry-run] would upload config.yaml to remote {spec.id}")
-        elif state == "in-sync":
-            print(f"[dry-run] config.yaml already in sync on remote {spec.id}")
-        elif force_config:
-            print(f"[dry-run] would overwrite differing config.yaml on remote {spec.id}")
-        else:
-            print(
-                f"[dry-run] remote {spec.id} has a differing config.yaml; "
-                "this run would fail without --force-config",
-                file=sys.stderr,
-            )
+            if state == "missing":
+                print(f"[dry-run] would upload config.yaml to remote {spec.id}")
+            elif state == "in-sync":
+                print(f"[dry-run] config.yaml already in sync on remote {spec.id}")
+            elif force_config:
+                print(f"[dry-run] would overwrite differing config.yaml on remote {spec.id}")
+            else:
+                print(
+                    f"[dry-run] remote {spec.id} has a differing config.yaml; "
+                    "this run would fail without --force-config",
+                    file=sys.stderr,
+                )
 
 
 def push_manifest(meta_path, by_profile) -> None:

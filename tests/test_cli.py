@@ -717,6 +717,7 @@ def test_dry_run_leaves_no_temp_file_behind(tmp_path):
     cfg, remotes = _sync_cfg(tmp_path, remote)
     cli.dry_run_config_sync(cfg, {"daily": remotes}, force_config=False)
     assert not (cfg.tmpdir / cfg.name / "config.yaml.dry-run").exists()
+    assert not (cfg.tmpdir / cfg.name).exists()
 
 
 def test_run_config_dry_run_leaves_no_staging_root(tmp_path, monkeypatch):
@@ -737,6 +738,7 @@ def test_sync_settings_uploads_when_missing(tmp_path):
     cli.sync_settings(cfg, remotes, force_config=False)
     assert remote.writes == ["config.yaml"]
     assert remote.stored == b"src: /x\n"
+    assert not (cfg.tmpdir / cfg.name).exists()
 
 
 def test_sync_settings_skips_identical_config(tmp_path):
