@@ -104,3 +104,24 @@ def test_invalid_yaml_raises(tmp_path):
     path.write_text("version: [unclosed\n  profiles: {}")
     with pytest.raises(manifest.BtrbakError):
         manifest.load(path)
+
+
+def test_profile_entry_orders_src_before_snapshots():
+    meta = manifest.default()
+    entry = manifest.profile(meta, "daily")
+    assert list(entry) == ["src", "snapshots"]
+    assert entry["src"] is None
+    assert entry["snapshots"] == []
+
+
+def test_profile_entry_roundtrips_key_order(tmp_path):
+    meta = manifest.default()
+    entry = manifest.profile(meta, "daily")
+    entry["src"] = "/mnt/data"
+    manifest.add_snapshot(meta, "daily", {"id": "a", "type": "full"})
+    path = tmp_path / "meta.yaml"
+    manifest.save(path, meta)
+
+    text = path.read_text()
+    assert text.index("src:") < text.index("snapshots:")
+    assert manifest.load(path)["profiles"]["daily"]["src"] == "/mnt/data"

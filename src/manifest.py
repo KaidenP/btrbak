@@ -51,7 +51,12 @@ def save(path, meta: dict) -> None:
 
 
 def profile(meta: dict, name: str) -> dict:
-    return meta["profiles"].setdefault(name, {"snapshots": []})
+    """Return (creating if needed) the profile entry for *name*.
+
+    ``src`` is seeded as ``None`` so it serialises before ``snapshots``; the
+    caller fills in the real value.
+    """
+    return meta["profiles"].setdefault(name, {"src": None, "snapshots": []})
 
 
 def snapshots(meta: dict, name: str) -> list:

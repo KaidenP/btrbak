@@ -631,10 +631,20 @@ def _push_manifest_best_effort(meta_path, by_profile) -> None:
 
 
 def ensure_profile_meta(meta, cfg) -> None:
+    """Ensure every configured profile has an entry recording its ``src``.
+
+    The entry is rebuilt when ``src`` is absent so that it is serialised
+    *before* ``snapshots``, keeping ``meta.yaml`` readable and diff-friendly
+    even for manifests written by earlier versions.
+    """
     for pname in cfg.profiles:
         entry = manifest.profile(meta, pname)
-        entry.setdefault("src", str(cfg.src))
-        entry.setdefault("snapshots", [])
+        if entry.get("src"):
+            continue
+        rest = {k: v for k, v in entry.items() if k != "src"}
+        entry.clear()
+        entry["src"] = str(cfg.src)
+        entry.update(rest)
 
 
 def unique_snapshot_id(base, profile_dir) -> str:
