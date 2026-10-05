@@ -899,6 +899,41 @@ def test_verify_reports_broken_chain(tmp_path, monkeypatch, capsys):
     assert "BROKEN CHAIN" in capsys.readouterr().out
 
 
+def test_verify_reports_local_only_parent(tmp_path, monkeypatch, capsys):
+    """A parent that exists but can never be received makes the chain unrestorable."""
+    _verify_setup(
+        tmp_path,
+        monkeypatch,
+        [_local("p1", 1000), _sent(id="s2", type="incr", parent="p1")],
+    )
+    assert cli.cmd_verify(_verify_args()) == 1
+    out = capsys.readouterr().out
+    assert "BROKEN CHAIN" in out
+    assert "local-only" in out
+
+
+def test_verify_reports_parent_without_a_complete_upload(tmp_path, monkeypatch, capsys):
+    parent = _sent(
+        id="p1",
+        type="full",
+        uploads=[{"remote": "offsite", "status": "failed"}],
+    )
+    _verify_setup(tmp_path, monkeypatch, [parent, _sent(id="s2", type="incr", parent="p1")])
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "no complete upload" in capsys.readouterr().out
+
+
+def test_verify_accepts_a_restoreable_chain(tmp_path, monkeypatch, capsys):
+    """The parent checks must not reject a healthy full -> incr chain."""
+    _verify_setup(
+        tmp_path,
+        monkeypatch,
+        [_sent(id="p1", type="full"), _sent(id="s2", type="incr", parent="p1")],
+    )
+    assert cli.cmd_verify(_verify_args()) == 0
+    assert "ok" in capsys.readouterr().out
+
+
 def test_verify_reports_incomplete_upload(tmp_path, monkeypatch, capsys):
     _verify_setup(
         tmp_path, monkeypatch, [_sent(uploads=[{"remote": "offsite", "status": "failed"}])]
