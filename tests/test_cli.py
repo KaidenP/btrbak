@@ -436,7 +436,7 @@ def test_cmd_run_continues_after_config_error(monkeypatch, capsys):
     cfg_bad = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
     cfg_good = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
     monkeypatch.setattr(
-        cli.config_mod, "discover_configs", lambda subvol=None: [cfg_bad, cfg_good]
+        cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg_bad.path, cfg_bad, None), (cfg_good.path, cfg_good, None)]
     )
     ran = []
 
@@ -573,7 +573,7 @@ def test_cmd_list_skips_configs_without_profile(monkeypatch, capsys):
     cfg_a = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
     cfg_b = _cfg({"weekly": _profile("weekly", 86400, -1, 30 * 86400)})
     monkeypatch.setattr(
-        cli.config_mod, "discover_configs", lambda subvol=None: [cfg_a, cfg_b]
+        cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg_a.path, cfg_a, None), (cfg_b.path, cfg_b, None)]
     )
     monkeypatch.setattr(
         cli.manifest,
@@ -588,7 +588,7 @@ def test_cmd_list_skips_configs_without_profile(monkeypatch, capsys):
 def test_cmd_list_unknown_profile_raises(monkeypatch):
     cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
     monkeypatch.setattr(
-        cli.config_mod, "discover_configs", lambda subvol=None: [cfg]
+        cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)]
     )
 
     with pytest.raises(cli.config_mod.ConfigError):
@@ -834,7 +834,7 @@ def _verify_setup(tmp_path, monkeypatch, snapshots, remote=None, name="root"):
     (cfg.dest / "meta.yaml").write_text(
         yaml.safe_dump({"version": 1, "profiles": {"daily": {"snapshots": snapshots}}})
     )
-    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda subvol=None: [cfg])
+    monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
     monkeypatch.setattr(
         cli, "collect_remotes", lambda cfg: {"daily": [(spec, remote)]}
     )
@@ -1004,7 +1004,7 @@ def test_verify_continues_past_bad_remote_config(tmp_path, monkeypatch, capsys):
         yaml.safe_dump({"version": 1, "profiles": {"daily": {"snapshots": []}}})
     )
     monkeypatch.setattr(
-        cli.config_mod, "discover_configs", lambda subvol=None: [bad, good]
+        cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(bad.path, bad, None), (good.path, good, None)]
     )
 
     assert cli.cmd_verify(_verify_args()) == 2
@@ -1028,14 +1028,14 @@ def test_verify_surfaces_per_config_error(tmp_path, monkeypatch, capsys):
 
 def test_verify_unknown_profile_raises(tmp_path, monkeypatch):
     cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
-    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda subvol=None: [cfg])
+    monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
     with pytest.raises(cli.config_mod.ConfigError, match="unknown profile"):
         cli.cmd_verify(_verify_args(profile="nope"))
 
 
 def test_verify_skips_configs_without_profile(tmp_path, monkeypatch):
     cfg = _cfg({"weekly": _profile("weekly", 86400, -1, 30 * 86400)})
-    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda subvol=None: [cfg])
+    monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
     with pytest.raises(cli.config_mod.ConfigError, match="unknown profile"):
         cli.cmd_verify(_verify_args(profile="daily"))
 
@@ -1053,7 +1053,7 @@ def _list_setup(tmp_path, monkeypatch, snapshots=None, write_manifest=True):
                 {"version": 1, "profiles": {"daily": {"snapshots": snapshots or []}}}
             )
         )
-    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda subvol=None: [cfg])
+    monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
     return cfg
 
 
@@ -1161,7 +1161,7 @@ def test_cmd_list_handles_a_reversed_deep_chain(tmp_path, monkeypatch, capsys):
 
 def test_cmd_config_check_reports_errors(monkeypatch, capsys):
     cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
-    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda: [cfg])
+    monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
     monkeypatch.setattr(cli.config_mod, "validate", lambda cfg: (["boom"], ["careful"]))
     assert cli.cmd_config_check(SimpleNamespace()) == 2
     out = capsys.readouterr().out
@@ -1172,17 +1172,75 @@ def test_cmd_config_check_reports_errors(monkeypatch, capsys):
 
 def test_cmd_config_check_ok(monkeypatch, capsys):
     cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
-    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda: [cfg])
+    monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
     monkeypatch.setattr(cli.config_mod, "validate", lambda cfg: ([], []))
     assert cli.cmd_config_check(SimpleNamespace()) == 0
     assert "root:" in capsys.readouterr().out
 
 
+def test_cmd_config_check_reports_an_unloadable_config_and_keeps_going(tmp_path, monkeypatch, capsys):
+    """The whole point of `config check` is to report every problem at once."""
+    good = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    _stub_one_broken_config(monkeypatch, good, tmp_path)
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg: (["boom"], []))
+    assert cli.cmd_config_check(SimpleNamespace()) == 2
+    out = capsys.readouterr().out
+    assert "broken:" in out  # the unreadable config is labelled by file stem
+    assert "bad profile" in out
+    assert "boom" in out  # the second config was still validated
+
+
+def _stub_one_broken_config(monkeypatch, good, tmp_path):
+    """Stub discovery as one unreadable profile plus one that loads."""
+    broken = cli.config_mod.ConfigError("bad profile")
+    monkeypatch.setattr(
+        cli.config_mod,
+        "discover_configs_tolerant",
+        lambda subvol=None: [
+            (tmp_path / "broken.yaml", None, broken),
+            (tmp_path / "good.yaml", good, None),
+        ],
+    )
+
+
+def test_run_reports_an_unloadable_config_and_still_runs_the_rest(tmp_path, monkeypatch, capsys):
+    """One bad profile must not stop a timer-driven run for every other subvol."""
+    good = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    _stub_one_broken_config(monkeypatch, good, tmp_path)
+    seen = []
+    monkeypatch.setattr(cli, "run_config", lambda cfg, *a, **k: seen.append(cfg.name) or 0)
+    assert cli.cmd_run(SimpleNamespace(subvol=None, profile=None, force=False, force_config=False, full=False, dry_run=False)) == 2
+    assert seen == ["root"]
+    assert "bad profile" in capsys.readouterr().err
+
+
+def test_list_reports_an_unloadable_config_and_still_lists_the_rest(tmp_path, monkeypatch, capsys):
+    good = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    good.dest = tmp_path / "dest"
+    _stub_one_broken_config(monkeypatch, good, tmp_path)
+    assert cli.cmd_list(SimpleNamespace(subvol=None, profile=None)) == 2
+    captured = capsys.readouterr()
+    assert "bad profile" in captured.err
+    assert "root/daily:" in captured.out
+
+
+def test_verify_reports_an_unloadable_config_and_still_verifies_the_rest(tmp_path, monkeypatch, capsys):
+    good = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    good.tmpdir = tmp_path / "tmp"
+    good.dest = tmp_path / "dest"
+    _stub_one_broken_config(monkeypatch, good, tmp_path)
+    monkeypatch.setattr(cli, "_load_meta_for_verify", lambda cfg: (None, False))
+    assert cli.cmd_verify(_verify_args()) == 2
+    captured = capsys.readouterr()
+    assert "bad profile" in captured.err
+    assert "no manifest found" in captured.out
+
+
 def test_cmd_config_check_discovery_error(monkeypatch, capsys):
-    def boom():
+    def boom(subvol=None):
         raise cli.config_mod.ConfigError("no config files")
 
-    monkeypatch.setattr(cli.config_mod, "discover_configs", boom)
+    monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", boom)
     assert cli.cmd_config_check(SimpleNamespace()) == 2
     assert "config error" in capsys.readouterr().err
 
@@ -1328,7 +1386,7 @@ def test_main_reports_malformed_manifest_cleanly(monkeypatch, tmp_path, capsys):
         "version: 1\nprofiles:\n  daily:\n    snapshots:\n      - type: full\n"
     )
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda subvol=None: [cfg])
+    monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
 
     assert cli.main(["list"]) == 1
     assert "non-empty string 'id'" in capsys.readouterr().err

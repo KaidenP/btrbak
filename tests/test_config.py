@@ -357,6 +357,67 @@ def test_discover_configs_empty_dir_raises(tmp_path, monkeypatch):
         config.discover_configs()
 
 
+def _minimal_profile(src="/a", dest="/b"):
+    return {"src": src, "dest": dest, "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}}}
+
+
+def test_discover_configs_tolerant_reports_every_bad_file(tmp_path, monkeypatch):
+    """One unparseable profile must not hide the state of every other one."""
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    _write(tmp_path / "aaa.yaml", _minimal_profile("/a", "/b"))
+    (tmp_path / "mmm.yaml").write_text("src: relative/path\ndest: /b\nprofiles: {}\n")
+    _write(tmp_path / "zzz.yaml", _minimal_profile("/c", "/d"))
+
+    results = config.discover_configs_tolerant()
+
+    names = [cfg.name if cfg else path.stem for path, cfg, _ in results]
+    assert names == ["aaa", "mmm", "zzz"]
+    _path, middle_cfg, middle_error = results[1]
+    assert middle_cfg is None
+    assert "must be an absolute path" in str(middle_error)
+
+
+def test_discover_configs_tolerant_never_raises_for_bad_content(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    (tmp_path / "broken.yaml").write_text("profiles: [\n")
+    _write(tmp_path / "fine.yaml", _minimal_profile())
+    results = config.discover_configs_tolerant()
+    assert [cfg is not None for _, cfg, _ in results] == [False, True]
+    assert all(
+        error is None or isinstance(error, config.ConfigError)
+        for _, _, error in results
+    )
+
+
+def test_discover_configs_still_raises_on_the_first_bad_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    (tmp_path / "aaa.yaml").write_text("profiles: [\n")
+    _write(tmp_path / "zzz.yaml", _minimal_profile())
+    with pytest.raises(config.ConfigError):
+        config.discover_configs()
+
+
+def test_discover_configs_tolerant_discovery_failure_still_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "does-not-exist")
+    with pytest.raises(config.ConfigError):
+        config.discover_configs_tolerant()
+
+
+def test_discover_configs_tolerant_reports_bad_auth_for_every_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "profiles.d")
+    (tmp_path / "profiles.d").mkdir()
+    auth = tmp_path / "auth.yaml"
+    auth.write_text("- not a mapping\n")
+    monkeypatch.setattr(config, "AUTH_PATH", auth)
+    _write(tmp_path / "profiles.d" / "aaa.yaml", _minimal_profile())
+    _write(tmp_path / "profiles.d" / "bbb.yaml", _minimal_profile())
+    results = config.discover_configs_tolerant()
+    assert [cfg for _, cfg, _ in results] == [None, None]
+    assert all(
+        "auth file must be a mapping" in str(error) for _, _, error in results
+    )
+
+
 def test_remote_identity_distinguishes_settings():
     a = config.RemoteSpec("offsite", "dir", {"path": "/a"})
     b = config.RemoteSpec("offsite", "dir", {"path": "/b"})

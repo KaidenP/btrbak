@@ -124,10 +124,24 @@ def build_parser() -> argparse.ArgumentParser:
 # --- run -------------------------------------------------------------------
 
 
+def _discover(subvol):
+    """Return ``(config, error)`` for every config file in scope.
+
+    Wraps :func:`config.discover_configs_tolerant` so each command reports a
+    config that fails to load and keeps going with the rest, instead of one
+    broken profile file masking every other one.
+    """
+    return config_mod.discover_configs_tolerant(subvol)
+
+
 def cmd_run(args) -> int:
-    configs = config_mod.discover_configs(args.subvol)
     selected_configs = []
-    for cfg in configs:
+    config_errors = 0
+    for path, cfg, error in _discover(args.subvol):
+        if error is not None:
+            print(f"config error: {error}", file=sys.stderr)
+            config_errors += 1
+            continue
         selected = config_mod.select_profiles(cfg, args.profile)
         if selected is None:
             continue
@@ -137,7 +151,6 @@ def cmd_run(args) -> int:
 
     upload_failures = 0
     runtime_failures = 0
-    config_errors = 0
     for cfg in selected_configs:
         try:
             upload_failures += run_config(
@@ -734,28 +747,37 @@ def _snapshot_depths(meta, pname) -> dict:
 
 def cmd_config_check(args) -> int:
     try:
-        configs = config_mod.discover_configs()
+        discovered = _discover(None)
     except config_mod.ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
 
     return_code = 0
-    for cfg in configs:
+    for path, cfg, error in discovered:
+        if error is not None:
+            print(f"{path.stem}:")
+            print(f"  error: {error}")
+            return_code = 2
+            continue
         errors, warnings = config_mod.validate(cfg)
         print(f"{cfg.name}:")
         for warning in warnings:
             print(f"  warning: {warning}")
-        for error in errors:
-            print(f"  error: {error}")
+        for err in errors:
+            print(f"  error: {err}")
         if errors:
             return_code = 2
     return return_code
 
 
 def cmd_list(args) -> int:
-    configs = config_mod.discover_configs(args.subvol)
     matched = False
-    for cfg in configs:
+    config_errors = 0
+    for path, cfg, error in _discover(args.subvol):
+        if error is not None:
+            print(f"config error: {error}", file=sys.stderr)
+            config_errors += 1
+            continue
         selected = config_mod.select_profiles(cfg, args.profile)
         if selected is None:
             continue
@@ -785,7 +807,7 @@ def cmd_list(args) -> int:
                 )
     if args.profile and not matched:
         raise config_mod.ConfigError(f"unknown profile: {args.profile!r}")
-    return 0
+    return 2 if config_errors else 0
 
 
 def _load_meta_for_verify(cfg):
@@ -820,11 +842,16 @@ def _load_meta_for_verify(cfg):
 
 
 def cmd_verify(args) -> int:
-    configs = config_mod.discover_configs(args.subvol)
     total_failures = 0
     config_errors = 0
     matched = False
-    for cfg in configs:
+    for path, cfg, error in _discover(args.subvol):
+        if error is not None:
+            # Report and keep going: one broken config must not hide the
+            # verification result of every other config.
+            print(f"config error: {error}", file=sys.stderr)
+            config_errors += 1
+            continue
         selected = config_mod.select_profiles(cfg, args.profile)
         if selected is None:
             continue

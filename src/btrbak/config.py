@@ -68,8 +68,9 @@ class Config:
 # --- loading ---------------------------------------------------------------
 
 
-def load_auth(path=AUTH_PATH) -> dict:
-    path = Path(path)
+def load_auth(path=None) -> dict:
+    """Load and return ``auth.yaml``; ``path`` defaults to the module constant."""
+    path = Path(path) if path is not None else Path(AUTH_PATH)
     if not path.exists():
         return {}
     try:
@@ -152,11 +153,10 @@ def load_config(path, auth: dict) -> Config:
     )
 
 
-def discover_configs(subvol=None) -> list[Config]:
-    auth = load_auth()
+def discover_config_paths(subvol=None) -> list[Path]:
+    """Return every config path in scope, without parsing any of them."""
     if subvol:
-        return [load_config(config_path_for_subvol(subvol), auth)]
-
+        return [config_path_for_subvol(subvol)]
     if not CONFIG_DIR.is_dir():
         raise ConfigError(f"config directory not found: {CONFIG_DIR}")
     # Prefer <name>.yaml over <name>.yml when both exist for the same subvol.
@@ -168,7 +168,52 @@ def discover_configs(subvol=None) -> list[Config]:
     paths = sorted(by_stem.values(), key=lambda p: p.name)
     if not paths:
         raise ConfigError(f"no config files found in {CONFIG_DIR}")
-    return [load_config(path, auth) for path in paths]
+    return paths
+
+
+def discover_configs(subvol=None) -> list[Config]:
+    """Load every config in scope, raising :class:`ConfigError` on the first failure.
+
+    The strict counterpart to :func:`discover_configs_tolerant`, kept for
+    callers that would rather abort than iterate a partial result.
+    """
+    results = discover_configs_tolerant(subvol)
+    for _path, cfg, error in results:
+        if error is not None:
+            raise error
+    return [cfg for _, cfg, _ in results]
+
+
+def discover_configs_tolerant(subvol=None) -> list[tuple[Path, Config | None, ConfigError | None]]:
+    """Load every config in scope, reporting per-file failures instead of raising.
+
+    Returns one ``(path, config, error)`` triple per config file, with exactly
+    one of the last two set. Discovery itself (a missing config dir, no files,
+    or an unknown SUBVOL) is still fatal -- there is nothing to iterate -- but
+    one unparseable profile file no longer hides the state of every other one.
+
+    This matters most for ``config check``, whose entire purpose is to report
+    all outstanding problems at once, and for a timer-driven ``run``, where a
+    single bad profile should not stop backups for the others.
+    """
+    paths = discover_config_paths(subvol)
+    try:
+        auth = load_auth()
+    except ConfigError as exc:
+        auth, auth_error = {}, exc
+    else:
+        auth_error = None
+
+    results = []
+    for path in paths:
+        if auth_error is not None:
+            results.append((path, None, auth_error))
+            continue
+        try:
+            results.append((path, load_config(path, auth), None))
+        except ConfigError as exc:
+            results.append((path, None, exc))
+    return results
 
 
 def config_path_for_subvol(subvol) -> Path:
