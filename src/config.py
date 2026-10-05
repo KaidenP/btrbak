@@ -7,6 +7,7 @@ live in ``/etc/btrbak/auth.yaml``.
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -14,11 +15,22 @@ import yaml
 
 import timespan
 from remotes import create_remote
-from util import age_recipient_kind, is_nested, is_subvolume, same_device, which
+from util import (
+    age_recipient_error,
+    is_nested,
+    is_subvolume,
+    same_device,
+    which,
+)
 
 CONFIG_DIR = Path("/etc/btrbak/profiles.d")
 AUTH_PATH = Path("/etc/btrbak/auth.yaml")
 DEFAULT_TMPDIR = Path("/var/tmp/btrbak")
+
+# Profile names become path components under `dest` (`<dest>/<profile>/<id>`)
+# and under every remote (`<profile>/<id>.send`), so they are restricted to a
+# conservative, filesystem-safe character set with no separators at all.
+PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class ConfigError(Exception):
@@ -77,6 +89,27 @@ def _parse_tmpdir(value) -> Path:
     return Path(str(value)).expanduser()
 
 
+def _validate_profile_name(name, path) -> None:
+    """Reject profile names that are unsafe as a path component."""
+    text = str(name)
+    if not PROFILE_NAME_RE.match(text) or text in (".", ".."):
+        raise ConfigError(
+            f"{path}: profile name {name!r} is not allowed; use letters, digits, "
+            "'.', '_' or '-' and start with a letter or digit"
+        )
+
+
+def _require_absolute(value, label: str, path) -> None:
+    """Reject relative paths.
+
+    ``src``/``dest``/``tmpdir`` are resolved against the current working
+    directory otherwise, which silently makes behaviour depend on where the
+    tool happened to be invoked from (a systemd unit's WorkingDirectory).
+    """
+    if not Path(value).expanduser().is_absolute():
+        raise ConfigError(f"{path}: '{label}' must be an absolute path: {value}")
+
+
 def load_config(path, auth: dict) -> Config:
     path = Path(path)
     try:
@@ -91,6 +124,10 @@ def load_config(path, auth: dict) -> Config:
     dest = data.get("dest")
     if not src or not dest:
         raise ConfigError(f"{path}: 'src' and 'dest' are required")
+    _require_absolute(src, "src", path)
+    _require_absolute(dest, "dest", path)
+    if data.get("tmpdir"):
+        _require_absolute(data["tmpdir"], "tmpdir", path)
 
     profiles_raw = data.get("profiles")
     if not isinstance(profiles_raw, dict) or not profiles_raw:
@@ -100,6 +137,7 @@ def load_config(path, auth: dict) -> Config:
     for pname, praw in profiles_raw.items():
         if not isinstance(praw, dict):
             raise ConfigError(f"{path}: profile {pname!r} must be a mapping")
+        _validate_profile_name(pname, path)
         profiles[pname] = _parse_profile(pname, praw, auth, path)
 
     return Config(
@@ -345,11 +383,9 @@ def validate(config: Config, check_remotes=True, check_nesting=True):
                 config.encryption["identity"], "age identity file", warnings
             )
         for recipient in config.encryption["recipients"]:
-            if age_recipient_kind(recipient) == "unknown":
-                errors.append(
-                    "age recipient is neither an existing file nor an inline "
-                    f"age1 key: {recipient!r}"
-                )
+            problem = age_recipient_error(recipient)
+            if problem is not None:
+                errors.append(f"age recipient is invalid: {recipient!r}: {problem}")
 
     return errors, warnings
 

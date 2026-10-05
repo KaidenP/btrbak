@@ -388,7 +388,10 @@ def test_validate_errors_on_missing_age_recipient_path(tmp_path):
     cfg = config.load_config(cfg_file, {})
     (tmp_path / "src").mkdir()
     errors, _warnings = config.validate(cfg, check_remotes=False)
-    assert any("age recipient is neither an existing file" in error for error in errors)
+    assert any(
+        "neither an existing file nor an inline age1 key" in error
+        for error in errors
+    )
 
 
 def _validate_cfg(tmp_path, dest):
@@ -430,3 +433,111 @@ def test_validate_nesting_warning_can_be_suppressed(tmp_path, monkeypatch):
 
     _errors, warnings = config.validate(cfg, check_remotes=False, check_nesting=False)
     assert not any("nested inside src" in warning for warning in warnings)
+
+
+# --- path safety ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "pname",
+    [
+        "../../../../tmp/pwned",
+        "daily/weekly",
+        "..",
+        ".",
+        "",
+        "-leading-dash",
+        "with space",
+        "with\x00null",
+        "back\\slash",
+    ],
+)
+def test_load_config_rejects_unsafe_profile_names(tmp_path, pname):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": str(tmp_path / "src"),
+            "dest": str(tmp_path / "dest"),
+            "profiles": {
+                pname: {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}
+            },
+        },
+    )
+    with pytest.raises(config.ConfigError, match="profile name"):
+        config.load_config(cfg_file, {})
+
+
+@pytest.mark.parametrize("pname", ["daily", "daily7", "weekly-2024", "a.b_c-d", "x"])
+def test_load_config_accepts_safe_profile_names(tmp_path, pname):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": str(tmp_path / "src"),
+            "dest": str(tmp_path / "dest"),
+            "profiles": {
+                pname: {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}
+            },
+        },
+    )
+    assert list(config.load_config(cfg_file, {}).profiles) == [pname]
+
+
+@pytest.mark.parametrize("field", ["src", "dest"])
+def test_load_config_requires_absolute_paths(tmp_path, field):
+    cfg_file = tmp_path / "root.yaml"
+    data = {
+        "src": str(tmp_path / "src"),
+        "dest": str(tmp_path / "dest"),
+        "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+    }
+    data[field] = "relative/path"
+    _write(cfg_file, data)
+    with pytest.raises(config.ConfigError, match=f"'{field}' must be an absolute"):
+        config.load_config(cfg_file, {})
+
+
+def test_load_config_requires_absolute_tmpdir(tmp_path):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": str(tmp_path / "src"),
+            "dest": str(tmp_path / "dest"),
+            "tmpdir": "relative/tmp",
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        },
+    )
+    with pytest.raises(config.ConfigError, match="'tmpdir' must be an absolute"):
+        config.load_config(cfg_file, {})
+
+
+def test_load_config_accepts_tilde_paths(tmp_path):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": "~/src",
+            "dest": "~/dest",
+            "tmpdir": "~/tmp",
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        },
+    )
+    cfg = config.load_config(cfg_file, {})
+    assert cfg.src.is_absolute()
+    assert cfg.tmpdir.is_absolute()
+
+
+def test_empty_tmpdir_still_falls_back_to_default(tmp_path):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": str(tmp_path / "src"),
+            "dest": str(tmp_path / "dest"),
+            "tmpdir": "",
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        },
+    )
+    assert config.load_config(cfg_file, {}).tmpdir == config.DEFAULT_TMPDIR
