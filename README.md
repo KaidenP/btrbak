@@ -21,6 +21,22 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 - `/etc/btrbak/profiles.d/<name>.yaml` — one file per source subvolume.
 - `/etc/btrbak/auth.yaml` — remote credentials referenced by `auth:` keys.
 
+`src`, `dest` and `tmpdir` must be absolute paths, and profile names must match
+`[A-Za-z0-9][A-Za-z0-9._-]*` (they are used as path components under `dest` and
+on each remote). Run `sudo btrbak config check` to validate everything,
+including that every `age` recipient actually works.
+
+## Restoring
+
+```
+sudo btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
+```
+
+`TARGET` must be on btrfs and is created only after the whole chain validates.
+A restore interrupted part way through can simply be re-run into the same
+target: the links already received are detected and skipped, so the chain
+resumes instead of failing with `File exists`.
+
 ## Development
 
 Install the project in editable mode to expose the `btrbak` command:

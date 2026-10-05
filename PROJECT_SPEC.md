@@ -125,6 +125,16 @@ One file = one source subvolume + its profiles. The filename stem (`<name>`) is
 the **SUBVOL** selector used on the CLI. Config files may use either `.yaml`
 or `.yml`; when both exist for the same stem, `.yaml` takes precedence.
 
+`src`, `dest` and `tmpdir` **must be absolute paths**. They are resolved once,
+at load time, rather than against the process working directory, so behaviour
+does not depend on where the tool happened to be invoked from (a systemd unit's
+`WorkingDirectory`). `~` is expanded.
+
+Profile names become path components — `<dest>/<profile>/<snapshot-id>` locally
+and `<profile>/<snapshot-id>.send` on every remote — so they are restricted to
+`[A-Za-z0-9][A-Za-z0-9._-]*`. A name containing a path separator, or equal to
+`.`/`..`, is a config error.
+
 ```yaml
 # /etc/btrbak/profiles.d/root.yaml
 src: /mnt/data                      # absolute path to the btrfs subvolume to back up
@@ -229,10 +239,20 @@ automatically" (manual-only). `keep` must always be a positive timespan.
 
 ### 6.4 Config validation (`btrbak config check`)
 
+Structural checks run while the config is **loaded**, and are reported as
+`config error` (exit `2`) by every command:
+
+- `src`, `dest` and (when set) `tmpdir` are absolute paths.
+- Profile names match `[A-Za-z0-9][A-Za-z0-9._-]*` (see §6.1).
+- Timespans parse; `keep` is a positive timespan, never `-1` (§6.3).
+
+Deeper checks run in `validate()`:
+
 - All files parse as valid YAML; required fields present and correctly typed.
 - `src` exists, is a btrfs subvolume (`btrfs subvolume show` succeeds).
 - `dest` exists or is creatable, is a **directory** (not a file), and is on the
-  **same btrfs filesystem** as `src` (same `st_dev`). `dest` must **not** resolve
+  **same btrfs filesystem** as `src` (compared by filesystem UUID, because
+  btrfs subvolumes report distinct `st_dev` values). `dest` must **not** resolve
   to `src` itself — snapshotting a subvolume into itself is rejected as an error,
   not merely warned about.
 - `tmpdir` exists or is creatable, is a **directory** (not a file), and is
@@ -246,9 +266,13 @@ automatically" (manual-only). `keep` must always be a positive timespan.
 - `remotes` is optional (omit for a local-only profile). When present: each
   remote `type` is registered, `name` (if given) is unique within the profile,
   `auth` keys resolve in `auth.yaml`, and `remote.validate()` passes.
-- If `encryption` is enabled: `recipients` present, each recipient is an
-  existing recipients file or an inline `age1` key, and the `age` binary is
-  found.
+- If `encryption` is enabled: `recipients` present, the `age` binary is found,
+  and **every recipient is validated by asking `age` to encrypt a throwaway
+  payload** — the same code path used when a backup is sent. A recipients file
+  is validated with `-R`, an inline key with `-r`. This rejects keys that merely
+  start with `age1` but are malformed (bad checksum, mixed case, truncated) at
+  `config check` time rather than after a snapshot subvolume has already been
+  created. Public keys are not secret, so `age`'s message is surfaced verbatim.
 - If `compression` is enabled: valid algorithm/level.
 
 ---
@@ -357,6 +381,25 @@ considered committed for retention purposes, but it is **never** chosen as a
 The `remote` field is a **stable id**: the remote's `name` if set, otherwise a
 hash of its `type` plus non-secret settings. It does not depend on list order,
 so reordering remotes in the config never corrupts the manifest.
+
+### 8.1 Manifest validation
+
+`<dest>/meta.yaml` is read from disk and from remote copies, including copies
+that may have been hand-edited or truncated by a partial write from another
+tool. `load()` therefore validates the structure before any command touches it
+and raises a clean `error: ...` (exit `1`) rather than letting a bad field
+surface as a traceback deep inside a command:
+
+- `version` must equal `1`; `profiles` must be a mapping; each profile entry
+  must be a mapping.
+- Each snapshot must be a mapping with a **non-empty string `id`**, unique
+  within its profile (`id` is the key for retention planning, the dependency
+  tree and chain building).
+- `parent` must be a string or `null`; `uploads` must be a list of mappings.
+- A missing `snapshots` list is normalised to `[]`.
+
+A missing or non-numeric `created` is *not* fatal: it degrades to `0` (oldest
+possible) so a stray value cannot corrupt due-date and retention arithmetic.
 
 ---
 
@@ -485,24 +528,45 @@ Invariants (why this is safe):
 2. Load config + manifest; locate `SNAPSHOT_ID`.
 3. Build the chain: follow `parent` links from the target snapshot back to the
    full (root), then reverse to get root → … → target order.
-4. For each snapshot in chain order:
+4. Validate the **whole** chain up front: no link may be `local`-only or lack a
+   complete remote upload. `TARGET` is created only after every check passes, so
+   a rejected restore never leaves an empty directory tree behind.
+5. Determine the resume point (§10.2).
+6. For each remaining snapshot in chain order:
    - Download `<profile>/<id>.send` from a remote (prefer a `complete` upload).
+   - Verify the downloaded `sha256` and `size` against the manifest.
    - Decrypt (if encrypted) using the snapshot's recorded `encryption.identity`;
      decompress (if compressed) using the snapshot's recorded `compression`.
    - `btrfs receive <TARGET>` to replay the stream.
-5. The restored data ends up as a received subvolume under `TARGET`.
+7. The restored data ends up as a received subvolume under `TARGET`.
 
 `btrfs receive` matches incremental parents by the subvolume UUID embedded in
 the send stream, so replaying in order into the same target is sufficient.
 
-Notes:
+### 10.1 Resumable restore
 
-- Restore requires `age` (and the identity file) only if encryption was used.
-- Restore targets must be btrfs (documented and enforced).
-- Local-only snapshots have no send files and cannot be restored from a remote;
-  they are recoverable only from the local `dest`.
+`btrfs receive` creates one subvolume per stream, named after the snapshot id,
+directly inside `TARGET`. A restore interrupted part way through — a dropped
+network connection on a long chain, say — therefore leaves a **prefix** of the
+chain already received.
 
-### 10.1 Disaster recovery (restore from remote only)
+Re-running `restore` into the same target detects that prefix and skips those
+links, reporting `resuming restore: N of M link(s) already present`, so the
+restore completes instead of failing with `creating subvolume … File exists`.
+
+The resume point is the index of the first link in the chain that is not
+present in `TARGET`. A link counts as present only when it is a real btrfs
+subvolume; if `TARGET` holds a non-subvolume entry (an empty directory, say)
+under a snapshot id, the restore stops with an explicit error rather than
+letting `btrfs receive` fail cryptically. Because snapshot ids are per profile,
+restoring two profiles that produced the same id into one target is rejected by
+that check — use separate targets.
+
+Only a contiguous prefix is resumed. A gap (link 1 restored, link 3 restored,
+link 2 missing) is not repaired automatically, because skipping a parent would
+silently invalidate the chain; `restore` fails at the missing link instead.
+
+### 10.2 Disaster recovery (restore from remote only)
 
 To restore on a fresh host that has no local state:
 
@@ -520,6 +584,13 @@ building the chain.
 The target is validated before it is created — it must either not exist or be a
 directory, and must live on a btrfs filesystem. Only then is it created, so a
 rejected target never leaves an empty directory tree behind.
+
+Notes:
+
+- Restore requires `age` (and the identity file) only if encryption was used.
+- Restore targets must be btrfs (documented and enforced).
+- Local-only snapshots have no send files and cannot be restored from a remote;
+  they are recoverable only from the local `dest`.
 
 ---
 
@@ -600,14 +671,24 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   `sha256`) and that the dependency chain is intact; reports drift/failures.
   When the local `<dest>/meta.yaml` is missing, `verify` falls back to a copy
   downloaded from a configured remote; if no manifest is available locally or
-  on any remote, it reports an error.
+  on any remote, it reports an error. Like `run` and `list`, `verify` iterates
+  **every** matching config: a broken remote definition in one config is
+  reported to stderr and the remaining configs are still verified. Exit `2`
+  wins over `1` when both occur, since a config error is the more fundamental
+  failure.
 - `list` shows each profile's snapshots: id, age, type, parent, upload status,
-  and a compact dependency tree.
+  and a compact dependency tree, indented by dependency depth and headed with a
+  snapshot count. When the local manifest is missing, `list` says so on stderr
+  rather than silently printing nothing.
 - Exit codes: `0` success; `1` runtime error (including a differing remote
   `config.yaml` that is not overwritten); `2` config/validation error.
 - Logging to stderr (levels via `-v`); never log secrets or auth values, and
   subprocess error messages include only the program name (plus stderr), never
   command arguments.
+- Expected failures always surface as a one-line `error: …` / `config error: …`
+  message plus the documented exit code. Unexpected states (a hand-edited or
+  truncated `meta.yaml`, a non-numeric `created`) are rejected or normalised
+  while loading (§8.1) rather than escaping as a Python traceback.
 
 ---
 
@@ -623,8 +704,15 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   separate advisory `flock` under `<tmpdir>/<SUBVOL>.lock` to serialize their
   staging-directory use; they intentionally do not require the `dest` lock so
   disaster-recovery restores work when `dest` is absent or read-only.
-- On startup, after the lock is acquired, staging files under
-  `<tmpdir>/<SUBVOL>/` older than 24 h are removed.
+- `run` reaps stale staging files under `<tmpdir>/<SUBVOL>/` while holding that
+  same `<tmpdir>/<SUBVOL>.lock`, so a long-running restore can never have its
+  staging directory swept out from under it. The lock is taken
+  **non-blockingly**: a restore in progress skips the sweep (logged at `-v`)
+  and the backup proceeds normally.
+- Profile names are validated as path components (§6.1), so no config can make
+  snapshots or remote objects land outside `dest` / the remote root.
+- `src`, `dest` and `tmpdir` must be absolute (§6.1), so behaviour never
+  depends on the invoking process's working directory.
 - `tmpdir` staging files are removed on success; on failure the snapshot is
   retained and the send is re-attempted next run.
 - If `dest` is nested inside `src`, `run` prints a single warning naming both
@@ -654,16 +742,23 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 
 ## 15. Testing
 
-- Unit: timespan parsing, config validation, retention/dependency algorithm,
-  manifest read/write, remote path mapping, stable remote-id derivation.
+- Unit: timespan parsing, config validation (including profile-name and
+  absolute-path enforcement), retention/dependency algorithm, manifest
+  read/write and structural validation, remote path mapping, stable remote-id
+  derivation, age recipient classification/validation.
 - Integration (pytest): create a btrfs loopback image, mount it, and exercise
   the full `run` pipeline — snapshot → send → upload → manifest → prune →
   restore — for full and incremental chains, asserting restored content and
-  that dependency-preserving pruning never orphans an incremental. Local-only
-  profiles and `verify` fallback behavior are covered by unit tests.
-- CLI: root-check, arg parsing (`-v` before and after the subcommand),
-  `--dry-run` acquires no lock and writes nothing, and dry-run `config.yaml`
-  sync reporting for missing/in-sync/differing remotes.
+  that dependency-preserving pruning never orphans an incremental. Also covers
+  resuming a restore that was interrupted mid-chain, and rejection of a
+  non-subvolume entry occupying a snapshot id in the target.
+- CLI: root-check, exit-code mapping for every error class, arg parsing (`-v`
+  before and after the subcommand), `--dry-run` acquires no lock and writes
+  nothing, dry-run `config.yaml` sync reporting for missing/in-sync/differing
+  remotes, `verify` covering ok/corrupt/size-mismatch/missing/broken-chain/
+  incomplete/unknown-remote plus its continuation across configs, `list`
+  snapshot counts and missing-manifest warning, `config check` reporting, and
+  the staging-directory lock being skipped rather than fatal when held.
 
 ---
 
