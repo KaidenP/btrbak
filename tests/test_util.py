@@ -28,3 +28,23 @@ def test_age_recipient_kind(tmp_path):
     assert util.age_recipient_kind(str(keyfile)) == "file"
     assert util.age_recipient_kind("age1abc") == "key"
     assert util.age_recipient_kind("not-a-key.txt") == "unknown"
+
+
+def test_btrfs_fsid_matches_uppercase_uuid(monkeypatch):
+    """btrfs-progs spells the fs uuid ``uuid:`` or ``UUID:`` depending on version."""
+    for label in ("uuid", "UUID"):
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=f"Label: none  {label}: 7574148f-c138-4c09-9203-0352942dfe4f\n".encode(),
+        )
+        monkeypatch.setattr(util.subprocess, "run", lambda *a, **k: completed)
+        assert util.btrfs_fsid("/mnt/data") == "7574148f-c138-4c09-9203-0352942dfe4f"
+
+
+def test_btrfs_fsid_returns_none_without_match(monkeypatch):
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=b"Label: none\n"
+    )
+    monkeypatch.setattr(util.subprocess, "run", lambda *a, **k: completed)
+    assert util.btrfs_fsid("/mnt/data") is None

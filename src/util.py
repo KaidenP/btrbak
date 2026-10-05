@@ -128,7 +128,8 @@ def btrfs_fsid(path) -> str | None:
     if proc.returncode != 0:
         return None
     text = proc.stdout.decode("utf-8", "replace")
-    match = re.search(r"\buuid:\s*([0-9a-fA-F-]+)", text)
+    # btrfs-progs spells this `uuid:` in some versions and `UUID:` in others.
+    match = re.search(r"\buuid:\s*([0-9a-fA-F-]+)", text, re.IGNORECASE)
     return match.group(1).lower() if match else None
 
 
