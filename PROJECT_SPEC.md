@@ -230,16 +230,19 @@ automatically" (manual-only). `keep` must always be a positive timespan.
 
 - All files parse as valid YAML; required fields present and correctly typed.
 - `src` exists, is a btrfs subvolume (`btrfs subvolume show` succeeds).
-- `dest` exists or is creatable and is on the **same btrfs filesystem** as `src`
-  (same `st_dev`).
-- `tmpdir` exists and is writable (created if missing).
+- `dest` exists or is creatable, is a **directory** (not a file), and is on the
+  **same btrfs filesystem** as `src` (same `st_dev`).
+- `tmpdir` exists or is creatable, is a **directory** (not a file), and is
+  writable.
 - `profiles` non-empty; `freq.full` and `freq.incr` are each `-1` ("never") or a
   positive timespan; `keep` is a positive timespan.
 - Warnings (not errors): `dest` nested inside `src`; `keep` < `freq.incr`.
 - `remotes` is optional (omit for a local-only profile). When present: each
   remote `type` is registered, `name` (if given) is unique within the profile,
   `auth` keys resolve in `auth.yaml`, and `remote.validate()` passes.
-- If `encryption` is enabled: `recipients` present, `age` binary found.
+- If `encryption` is enabled: `recipients` present, each recipient is an
+  existing recipients file or an inline `age1` key, and the `age` binary is
+  found.
 - If `compression` is enabled: valid algorithm/level.
 
 ---
@@ -335,6 +338,12 @@ records (all of its remotes were removed), it is recorded with
 like a local snapshot; any offsite copies on the removed remote are no longer
 managed. The `committed` key is optional and defaults to false (absent).
 
+A snapshot may carry an optional `local_deleted: true` flag. It is set only
+when pruning deleted the local subvolume but a remote `delete` failed, so the
+entry is retained for a later remote-delete retry. Such a snapshot is still
+considered committed for retention purposes, but it is **never** chosen as a
+`send` parent (its local subvolume no longer exists).
+
 The `remote` field is a **stable id**: the remote's `name` if set, otherwise a
 hash of its `type` plus non-secret settings. It does not depend on list order,
 so reordering remotes in the config never corrupts the manifest.
@@ -347,7 +356,9 @@ so reordering remotes in the config never corrupts the manifest.
 
 - No args → process every config file, every profile.
 - `SUBVOL` → only the config file `/etc/btrbak/profiles.d/<SUBVOL>.yaml`.
-- `PROFILE` → only that profile within the selected config(s).
+- `PROFILE` → only that profile within the selected config(s). When
+  `PROFILE` is given without `SUBVOL`, config files that do not define that
+  profile are skipped; if none define it, the command fails with a config error.
 - `--force` → create a backup even if nothing is due (used for manual profiles,
   e.g. an apt hook). Type selection is described in §9.1.
 - `--full` → create a full (parentless) backup now; implies `--force`. Ignored
@@ -435,6 +446,13 @@ snapshot:
 2. `remote.delete("<profile>/<id>.send")` on every remote (skipped for a
    local-only profile).
 3. Remove the entry from `meta.yaml`; rewrite and re-upload `meta.yaml`.
+
+If a remote `delete` fails after the local subvolume was removed, the entry is
+kept in `meta.yaml` and marked `local_deleted: true` (see §8) so the remote
+delete is retried on the next run without the snapshot ever being reused as a
+`send` parent. If the local `btrfs subvolume delete` itself fails, pruning
+aborts for that profile with both the local subvolume and the manifest entry
+intact.
 
 The source subvolume `src` is never deleted; only snapshots under `dest`.
 
@@ -577,7 +595,10 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 - Uploads are verified against the recorded `sha256` (on `restore`, download
   sha is compared before receive).
 - Never prune incomplete, failed, or referenced snapshots.
-- Per-config `flock` prevents overlapping runs.
+- Per-config `flock` prevents overlapping runs. `verify` and `restore` take a
+  separate advisory `flock` under `<tmpdir>/<SUBVOL>.lock` to serialize their
+  staging-directory use; they intentionally do not require the `dest` lock so
+  disaster-recovery restores work when `dest` is absent or read-only.
 - On startup, after the lock is acquired, staging files under
   `<tmpdir>/<SUBVOL>/` older than 24 h are removed.
 - `tmpdir` staging files are removed on success; on failure the snapshot is
@@ -610,10 +631,11 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 
 - Unit: timespan parsing, config validation, retention/dependency algorithm,
   manifest read/write, remote path mapping, stable remote-id derivation.
-- Integration (pytest): create a btrfs loopback image, mount it, exercise
-  snapshot → send → compress/encrypt → upload → prune → restore end-to-end,
-  asserting restored content and that dependency-preserving pruning never
-  orphans an incremental; also cover local-only profiles and `verify`.
+- Integration (pytest): create a btrfs loopback image, mount it, and exercise
+  the full `run` pipeline — snapshot → send → upload → manifest → prune →
+  restore — for full and incremental chains, asserting restored content and
+  that dependency-preserving pruning never orphans an incremental. Local-only
+  profiles and `verify` fallback behavior are covered by unit tests.
 - CLI: root-check, arg parsing, `--dry-run` acquires no lock and touches no
   remote.
 

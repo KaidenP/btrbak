@@ -23,6 +23,14 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 
 ## Development
 
+Install the project in editable mode to expose the `btrbak` command:
+
+```
+python -m pip install -e .
+```
+
+Run the test suite:
+
 ```
 python -m pytest
 ```
