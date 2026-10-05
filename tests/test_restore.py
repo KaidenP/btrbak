@@ -130,3 +130,39 @@ def test_load_meta_for_restore_tries_next_remote_on_corrupt(tmp_path, monkeypatc
     tmpdir.mkdir()
     result = restore.load_meta_for_restore(config, "p", tmpdir)
     assert result == valid_meta
+
+
+def test_restore_does_not_create_target_on_non_btrfs(tmp_path, monkeypatch):
+    target = tmp_path / "target" / "deep"
+    monkeypatch.setattr(restore, "is_btrfs", lambda path: False)
+
+    with pytest.raises(restore.BtrbakError, match="must be on a btrfs filesystem"):
+        restore.restore(None, "p", "sid", target, {}, tmp_path)
+
+    assert not target.exists()
+    assert not (tmp_path / "target").exists()
+
+
+def test_restore_creates_target_on_btrfs(tmp_path, monkeypatch):
+    target = tmp_path / "target" / "deep"
+    monkeypatch.setattr(restore, "is_btrfs", lambda path: True)
+    meta = {
+        "version": 1,
+        "profiles": {
+            "p": {"snapshots": [{"id": "sid", "type": "local", "parent": None}]}
+        },
+    }
+
+    # The target directory is created before the snapshot lookup fails, which
+    # is exactly what a usable btrfs target should look like.
+    with pytest.raises(restore.BtrbakError, match="local-only"):
+        restore.restore(
+            SimpleNamespace(profiles={"p": SimpleNamespace(remotes=[])}),
+            "p",
+            "sid",
+            target,
+            meta,
+            tmp_path,
+        )
+
+    assert target.is_dir()

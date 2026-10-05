@@ -55,9 +55,11 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
     target = Path(target)
     if target.exists() and not target.is_dir():
         raise BtrbakError(f"restore target exists and is not a directory: {target}")
-    target.mkdir(parents=True, exist_ok=True)
     if not is_btrfs(target):
         raise BtrbakError(f"restore target must be on a btrfs filesystem: {target}")
+    # Create the target only once it is known to be usable, so that a failed
+    # validation never leaves an empty directory tree behind.
+    target.mkdir(parents=True, exist_ok=True)
 
     if manifest.get_snapshot(meta, profile_name, snapshot_id) is None:
         raise BtrbakError(f"snapshot not found: {profile_name}/{snapshot_id}")
