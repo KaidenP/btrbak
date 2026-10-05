@@ -1,6 +1,10 @@
+import os
 from pathlib import Path
 
+import pytest
+
 import cli
+import manifest
 from config import Config, Profile, RemoteSpec
 
 
@@ -311,3 +315,62 @@ def test_retry_upload_resends_when_no_complete_copy(tmp_path, monkeypatch):
     assert remote_b.writes == ["p/s1.send"]
     assert snap["sha256"] == "newhash"
     assert snap["size"] == len(b"newdata")
+
+
+def test_full_flag_ignored_for_local_only():
+    profile = _profile("local", 86400, -1, 14 * 86400)
+    cfg = _cfg({"local": profile})
+    meta = {"profiles": {"local": {"snapshots": [_local("a", 4990)]}}}
+    assert cli.compute_plan(cfg, profile, meta, 5000, full=True) == (False, None, None)
+    assert cli.compute_plan(cfg, profile, meta, 5000, force=True) == (True, "local", None)
+
+
+def test_reconcile_uploads_marks_committed_when_all_remotes_removed():
+    snap = {
+        "type": "full",
+        "uploads": [
+            {"remote": "removed1", "status": "complete"},
+            {"remote": "removed2", "status": "failed"},
+        ],
+    }
+    cli.reconcile_uploads(snap, set())
+    assert snap["uploads"] == []
+    assert snap["committed"] is True
+    assert manifest.committed(snap)
+
+
+def test_clean_tmpdir_removes_empty_dirs(tmp_path, monkeypatch):
+    cfg = _cfg({})
+    cfg.tmpdir = tmp_path / "tmp"
+    root = cfg.tmpdir / cfg.name
+    (root / "a" / "b").mkdir(parents=True)
+    old = root / "a" / "old.txt"
+    old.write_text("x")
+    os.utime(old, (5000, 5000))
+    monkeypatch.setattr(cli.util, "now", lambda: 59000)
+
+    cli.clean_tmpdir(cfg, max_age=100)
+
+    assert not old.exists()
+    assert not (root / "a").exists()
+
+
+def test_sync_settings_conflict_is_runtime_error(tmp_path):
+    cfg = _cfg({})
+    cfg.tmpdir = tmp_path / "tmp"
+    cfg.path = tmp_path / "root.yaml"
+    cfg.path.write_text("src: /x\n")
+
+    class ConflictRemote:
+        def read(self, remote_path, local_dest):
+            local_dest.write_bytes(b"different")
+
+        def write(self, local_src, remote_path):
+            pass
+
+    with pytest.raises(cli.util.BtrbakError):
+        cli.sync_settings(
+            cfg,
+            [(RemoteSpec("r", "dir", {"path": "/x"}), ConflictRemote())],
+            force_config=False,
+        )

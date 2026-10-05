@@ -37,6 +37,10 @@ def test_committed_and_last():
     assert manifest.last_full_committed(meta, "p")["id"] == "a"
 
 
+def test_committed_flag_overrides_empty_uploads():
+    assert manifest.committed({"type": "full", "committed": True, "uploads": []})
+
+
 def test_children():
     meta = manifest.default()
     manifest.add_snapshot(meta, "p", {"id": "a", "type": "full"})

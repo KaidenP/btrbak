@@ -65,6 +65,8 @@ def remove_snapshot(meta: dict, name: str, snapshot_id: str) -> None:
 
 
 def committed(snapshot: dict) -> bool:
+    if snapshot.get("committed"):
+        return True
     if snapshot.get("type") == "local":
         return True
     uploads = snapshot.get("uploads", [])

@@ -41,6 +41,9 @@ def main(argv=None) -> int:
     except (util.BtrbakError, RemoteError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -187,7 +190,7 @@ def compute_plan(cfg, profile, meta, now_ts, force=False, full=False):
             due = bool(candidates)
         else:
             due = bool(candidates) and (now_ts - last["created"] >= min(candidates))
-        if due or force or full:
+        if due or force:
             return True, "local", None
         return False, None, None
 
@@ -372,6 +375,11 @@ def reconcile_uploads(snap, current_ids) -> None:
     prune stale upload records so the snapshot can be retried against (or
     committed by) the remotes that remain. When duplicate records exist for a
     remote, keep the most favourable (``complete``) status.
+
+    A remote-backed snapshot whose upload records all referenced removed
+    remotes has no remaining offsite target to retry, so it is marked
+    ``committed`` and subsequently pruned by age/dependency like a local
+    snapshot.
     """
     uploads = snap.get("uploads", [])
     best = {}
@@ -391,6 +399,8 @@ def reconcile_uploads(snap, current_ids) -> None:
     kept = [best[rid] for rid in order]
     if kept != uploads:
         snap["uploads"] = kept
+    if snap.get("type") != "local" and uploads and not kept:
+        snap["committed"] = True
 
 
 def prune(cfg, meta, by_profile) -> None:
@@ -466,7 +476,7 @@ def sync_settings(cfg, remotes, force_config) -> None:
         if remote_bytes == local_bytes:
             continue
         if not force_config:
-            raise config_mod.ConfigError(
+            raise util.BtrbakError(
                 f"remote {spec.id} already has a different config.yaml; "
                 "use --force-config to overwrite"
             )
@@ -517,6 +527,13 @@ def clean_tmpdir(cfg, max_age=86400) -> None:
             try:
                 if now_ts - path.stat().st_mtime > max_age:
                     path.unlink()
+            except OSError:
+                pass
+    # Prune now-empty directories leaf-first, keeping the staging root itself.
+    for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if path.is_dir():
+            try:
+                path.rmdir()
             except OSError:
                 pass
 
@@ -585,13 +602,54 @@ def cmd_list(args) -> int:
     return 0
 
 
+def _load_meta_for_verify(cfg):
+    """Return ``(meta, used_remote)`` for verification.
+
+    Prefer the local ``dest/meta.yaml``; when it is missing, download a copy
+    from the first configured remote that has one. Returns ``(None, False)``
+    when no manifest is available anywhere.
+    """
+    local = cfg.dest / "meta.yaml"
+    if local.exists():
+        return manifest.load(local), False
+
+    tmpdir = cfg.tmpdir / cfg.name / "verify"
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    seen = set()
+    for profile in cfg.profiles.values():
+        for spec in profile.remotes:
+            key = config_mod.remote_identity(spec)
+            if key in seen:
+                continue
+            seen.add(key)
+            remote = create_remote(spec)
+            tmp = tmpdir / "meta.yaml"
+            try:
+                remote.read("meta.yaml", tmp)
+                return manifest.load(tmp), True
+            except Exception:  # noqa: BLE001 - try the next remote
+                continue
+            finally:
+                tmp.unlink(missing_ok=True)
+    return None, False
+
+
 def cmd_verify(args) -> int:
     configs = config_mod.discover_configs(args.subvol)
     total_failures = 0
     for cfg in configs:
         selected = config_mod.filter_profiles(cfg, args.profile)
         failures = 0
-        meta = manifest.load(cfg.dest / "meta.yaml")
+        meta, used_remote = _load_meta_for_verify(selected)
+        if meta is None:
+            print(f"{cfg.name}: no manifest found locally or on any remote")
+            total_failures += 1
+            continue
+        if used_remote:
+            print(
+                f"{cfg.name}: local meta.yaml missing; "
+                "verifying against a remote copy"
+            )
         by_profile = collect_remotes(selected)
         for pname in selected.profiles:
             lookup = {spec.id: (spec, remote) for spec, remote in by_profile[pname]}

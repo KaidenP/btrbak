@@ -5,7 +5,6 @@ from pathlib import Path
 import manifest
 import send
 from remotes import create_remote
-from remotes.base import RemoteNotFoundError
 from util import BtrbakError, is_btrfs, sha256_file
 
 
@@ -107,14 +106,19 @@ def load_meta_for_restore(config, profile_name, tmpdir) -> dict:
     if not profile.remotes:
         raise BtrbakError("no remotes configured and no local manifest")
 
+    errors = []
     for spec in profile.remotes:
         remote = create_remote(spec)
         tmp = tmpdir / "meta.yaml"
         try:
             remote.read("meta.yaml", tmp)
             return manifest.load(tmp)
-        except RemoteNotFoundError:
+        except Exception as exc:  # noqa: BLE001 - try the next remote
+            errors.append(f"{spec.id}: {exc}")
             continue
         finally:
             tmp.unlink(missing_ok=True)
-    raise BtrbakError("could not download meta.yaml from any remote")
+    detail = "; ".join(errors) if errors else "no remotes returned a manifest"
+    raise BtrbakError(
+        f"could not download a valid meta.yaml from any remote: {detail}"
+    )

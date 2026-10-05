@@ -1,6 +1,8 @@
 import pytest
 from types import SimpleNamespace
 
+import yaml
+
 import restore
 
 
@@ -75,3 +77,41 @@ def test_restore_target_is_file_raises(tmp_path):
     target.write_text("x")
     with pytest.raises(restore.BtrbakError):
         restore.restore(None, "p", "sid", target, {}, tmp_path)
+
+
+def test_load_meta_for_restore_tries_next_remote_on_corrupt(tmp_path, monkeypatch):
+    valid_meta = {"version": 1, "profiles": {"p": {"snapshots": []}}}
+
+    class FakeRemote:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self, remote_path, local_dest):
+            if isinstance(self.payload, Exception):
+                raise self.payload
+            local_dest.write_bytes(self.payload)
+
+    remotes = [
+        FakeRemote(b"version: [unclosed\n  profiles: {}"),  # corrupt YAML
+        FakeRemote(yaml.safe_dump(valid_meta).encode()),
+    ]
+
+    def fake_create_remote(spec):
+        return remotes.pop(0)
+
+    monkeypatch.setattr(restore, "create_remote", fake_create_remote)
+
+    config = SimpleNamespace(
+        dest=tmp_path / "dest",
+        tmpdir=tmp_path / "tmp",
+        name="root",
+        profiles={
+            "p": SimpleNamespace(
+                remotes=[SimpleNamespace(id="a"), SimpleNamespace(id="b")]
+            )
+        },
+    )
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    result = restore.load_meta_for_restore(config, "p", tmpdir)
+    assert result == valid_meta
