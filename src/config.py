@@ -285,6 +285,9 @@ def validate(config: Config, check_remotes=True):
     errors: list[str] = []
     warnings: list[str] = []
 
+    if _same_path(config.dest, config.src):
+        errors.append(f"dest must not be the same path as src: {config.dest}")
+
     btrfs_available = which("btrfs")
     if not btrfs_available:
         errors.append("the 'btrfs' binary was not found (install btrfs-progs)")
@@ -378,6 +381,14 @@ def _nearest_existing(path: Path) -> Path | None:
             return None
         path = path.parent
     return path
+
+
+def _same_path(a, b) -> bool:
+    """Return True when two paths resolve to the same location."""
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return Path(a) == Path(b)
 
 
 def _check_creatable(path: Path, label: str, errors: list[str]) -> None:

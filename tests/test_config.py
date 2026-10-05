@@ -389,3 +389,30 @@ def test_validate_errors_on_missing_age_recipient_path(tmp_path):
     (tmp_path / "src").mkdir()
     errors, _warnings = config.validate(cfg, check_remotes=False)
     assert any("age recipient is neither an existing file" in error for error in errors)
+
+
+def _validate_cfg(tmp_path, dest):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": str(tmp_path / "src"),
+            "dest": str(dest),
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        },
+    )
+    cfg = config.load_config(cfg_file, {})
+    (tmp_path / "src").mkdir(exist_ok=True)
+    return cfg
+
+
+def test_validate_rejects_dest_equal_to_src(tmp_path):
+    cfg = _validate_cfg(tmp_path, tmp_path / "src")
+    errors, _warnings = config.validate(cfg, check_remotes=False)
+    assert any("dest must not be the same path as src" in error for error in errors)
+
+
+def test_validate_rejects_dest_equal_to_src_via_trailing_slash(tmp_path):
+    cfg = _validate_cfg(tmp_path, str(tmp_path / "src") + "/")
+    errors, _warnings = config.validate(cfg, check_remotes=False)
+    assert any("dest must not be the same path as src" in error for error in errors)
