@@ -410,3 +410,20 @@ def test_restore_resumes_into_a_recovered_target(btrfs_fs, monkeypatch):
     restore.run_restore(cfg, "daily", full_id, target)
     assert (target / full_id / "a.txt").read_text() == "a\n"
     assert not (cfg.tmpdir / cfg.name / "restore").exists()
+
+
+def test_verify_leaves_no_staging_directory(btrfs_fs, monkeypatch):
+    mnt = btrfs_fs
+    src, snapshots, _target = _setup(mnt, "verify_tmp")
+    remote_root = mnt / "verify_tmp" / "remote"
+    tmpdir = mnt / "verify_tmp" / "tmp"
+    remote_root.mkdir()
+    tmpdir.mkdir()
+    cfg = _pipeline_cfg(mnt, "verify_tmp", src, snapshots, remote_root, tmpdir)
+
+    (src / "a.txt").write_text("a\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 0)
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
+
+    assert cli._verify_config(cfg) == 0
+    assert not (cfg.tmpdir / cfg.name / "verify").exists()

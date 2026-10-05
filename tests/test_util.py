@@ -79,6 +79,33 @@ def test_subvolume_uuid_returns_none_when_binary_missing(monkeypatch):
     assert util.subvolume_uuid("/x") is None
 
 
+def test_scratch_dir_removes_itself_when_left_empty(tmp_path):
+    path = tmp_path / "work" / "verify"
+    with util.scratch_dir(path) as scratch:
+        assert scratch.is_dir()
+        (scratch / "a.send").write_bytes(b"x")
+        (scratch / "a.send").unlink()
+    assert not path.exists()
+    assert path.parent.is_dir()
+
+
+def test_scratch_dir_keeps_a_non_empty_directory(tmp_path):
+    """A leftover file from a crashed run means the directory is still in use."""
+    path = tmp_path / "verify"
+    with util.scratch_dir(path) as scratch:
+        (scratch / "leftover").write_bytes(b"x")
+    assert path.is_dir()
+    assert (path / "leftover").exists()
+
+
+def test_rmdir_quiet_ignores_missing_and_non_empty(tmp_path):
+    (tmp_path / "full").mkdir()
+    (tmp_path / "full" / "child").mkdir()
+    util.rmdir_quiet(tmp_path / "full")
+    util.rmdir_quiet(tmp_path / "does-not-exist")
+    assert (tmp_path / "full" / "child").is_dir()
+
+
 def test_age_recipient_kind(tmp_path):
     keyfile = tmp_path / "recipients.txt"
     keyfile.write_text("age1abc\n")

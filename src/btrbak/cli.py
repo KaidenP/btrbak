@@ -218,6 +218,9 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
         for pname, profile in selected.profiles.items():
             for sid in retention.plan_prune(meta, pname, profile.keep, now_ts):
                 print(f"[dry-run] {selected.name}/{pname}: would prune snapshot {sid}")
+        # The sync check above staged its download under the staging root;
+        # leave nothing behind, since --dry-run writes no other state.
+        util.rmdir_quiet(selected.tmpdir / selected.name)
         return 0
 
     selected.dest.mkdir(parents=True, exist_ok=True)
@@ -255,7 +258,10 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
             _push_manifest_best_effort(meta_path, by_profile)
             raise
         manifest.save(meta_path, meta)
-        push_manifest(meta_path, by_profile)
+        # Best-effort like every other push: the local manifest is
+        # authoritative and the remote copy is refreshed on the next run, so a
+        # remote hiccup here must not fail an otherwise successful backup.
+        _push_manifest_best_effort(meta_path, by_profile)
     return failures
 
 

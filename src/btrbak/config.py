@@ -353,11 +353,34 @@ def _normalize_encryption(encryption, path) -> dict | None:
     if not isinstance(recipients, list) or not recipients:
         raise ConfigError(f"{path}: encryption requires a non-empty 'recipients' list")
     identity = encryption.get("identity")
+    if identity:
+        _require_absolute(identity, "encryption.identity", path)
+    for recipient in recipients:
+        _require_absolute_recipient(recipient, path)
     return {
         "algorithm": "age",
         "recipients": [str(r) for r in recipients],
         "identity": str(identity) if identity else None,
     }
+
+
+def _require_absolute_recipient(recipient, path) -> None:
+    """Reject a relative age recipients-file path.
+
+    A recipient is either an inline ``age1...`` key or the path to a recipients
+    file. ``send`` resolves a file recipient with ``os.path.exists`` and then
+    passes it straight to ``age -R``, so a relative one would silently resolve
+    against the invoking process's working directory -- the same class of bug
+    as a relative ``src``/``dest``/``tmpdir``, which are rejected outright.
+    """
+    text = str(recipient)
+    if text.startswith("age1"):
+        return
+    if not Path(text).expanduser().is_absolute():
+        raise ConfigError(
+            f"{path}: age recipient {text!r} is neither an inline 'age1...' key "
+            "nor an absolute path to a recipients file"
+        )
 
 
 # --- validation ------------------------------------------------------------

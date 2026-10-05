@@ -719,6 +719,18 @@ def test_dry_run_leaves_no_temp_file_behind(tmp_path):
     assert not (cfg.tmpdir / cfg.name / "config.yaml.dry-run").exists()
 
 
+def test_run_config_dry_run_leaves_no_staging_root(tmp_path, monkeypatch):
+    """--dry-run promises to write nothing, including the staging directory."""
+    remote = _ConfigRemote(stored=b"tampered\n")
+    cfg, remotes = _sync_cfg(tmp_path, remote)
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg, **kw: ([], []))
+    monkeypatch.setattr(cli, "collect_remotes", lambda cfg: {"daily": remotes})
+
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=True)
+
+    assert not (cfg.tmpdir / cfg.name).exists()
+
+
 def test_sync_settings_uploads_when_missing(tmp_path):
     remote = _ConfigRemote()
     cfg, remotes = _sync_cfg(tmp_path, remote)
@@ -1306,6 +1318,22 @@ def _run_setup(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli.send, "send_snapshot", fake_send)
     return cfg, cleaned
+
+
+def test_run_config_survives_a_failing_final_manifest_push(tmp_path, monkeypatch, capsys):
+    """A remote hiccup on the post-prune push must not fail a good backup.
+
+    The local manifest is authoritative and the remote copy is refreshed on the
+    next run, so the run should warn rather than report a failure.
+    """
+    cfg, _ = _run_setup(tmp_path, monkeypatch)
+
+    def boom(*a, **kw):
+        raise cli.RemoteError("remote is down")
+
+    monkeypatch.setattr(cli, "push_manifest", boom)
+    assert cli.run_config(cfg, None, True, True, False, False) == 0
+    assert "failed to push manifest" in capsys.readouterr().err
 
 
 def test_run_config_cleans_tmpdir_when_lock_free(tmp_path, monkeypatch):

@@ -455,6 +455,47 @@ def test_validate_errors_on_missing_age_recipient_path(tmp_path):
     )
 
 
+def _encryption_cfg(tmp_path, **encryption):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": str(tmp_path / "src"),
+            "dest": str(tmp_path / "dest"),
+            "encryption": encryption,
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        },
+    )
+    return cfg_file
+
+
+def test_relative_age_recipient_file_is_rejected(tmp_path):
+    """A relative recipients path would resolve against the process cwd."""
+    cfg_file = _encryption_cfg(tmp_path, algorithm="age", recipients=["recipients.txt"])
+    with pytest.raises(config.ConfigError, match="neither an inline"):
+        config.load_config(cfg_file, {})
+
+
+def test_relative_age_identity_is_rejected(tmp_path):
+    cfg_file = _encryption_cfg(
+        tmp_path, algorithm="age", recipients=["age1abc"], identity="keys/id.key"
+    )
+    with pytest.raises(config.ConfigError, match="encryption.identity"):
+        config.load_config(cfg_file, {})
+
+
+def test_absolute_age_recipient_and_identity_are_accepted(tmp_path):
+    cfg_file = _encryption_cfg(
+        tmp_path,
+        algorithm="age",
+        recipients=[str(tmp_path / "recipients.txt"), "age1abc"],
+        identity=str(tmp_path / "id.key"),
+    )
+    cfg = config.load_config(cfg_file, {})
+    assert cfg.encryption["recipients"] == [str(tmp_path / "recipients.txt"), "age1abc"]
+    assert cfg.encryption["identity"] == str(tmp_path / "id.key")
+
+
 def _validate_cfg(tmp_path, dest):
     cfg_file = tmp_path / "root.yaml"
     _write(

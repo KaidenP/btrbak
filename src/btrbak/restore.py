@@ -69,6 +69,11 @@ def _resume_point(target: Path, chain: list[str], meta: dict, profile_name: str)
     so a correctly received link matches exactly. Manifests written before
     UUIDs were recorded carry no ``uuid`` and fall back to the name-only check.
 
+    Matching the UUID also means a half-received link cannot be mistaken for a
+    finished one: ``btrfs receive`` builds each stream into a temporary
+    subvolume and renames it into place only on success, so an interrupted
+    receive leaves nothing at the snapshot id for this to match.
+
     Raises :class:`BtrbakError` when the target holds a non-subvolume entry
     under a snapshot id, or a subvolume with a different UUID, since either
     would block ``btrfs receive`` or silently invalidate the chain.
