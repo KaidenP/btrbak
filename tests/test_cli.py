@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 import cli
 import manifest
@@ -729,3 +730,459 @@ def test_verbosity_accepted_before_and_after_subcommand(monkeypatch, argv, expec
     monkeypatch.setattr(cli, "cmd_list", lambda args: 0)
     assert cli.main(argv) == 0
     assert cli.VERBOSITY == expected
+
+
+# --- verify -----------------------------------------------------------------
+
+
+class _VerifyRemote:
+    """Remote whose stored bytes can be made to drift from the manifest."""
+
+    def __init__(self, data=b"payload"):
+        self.data = data
+        self.reads = []
+
+    def read(self, remote_path, local_dest):
+        self.reads.append(remote_path)
+        local_dest.write_bytes(self.data)
+
+
+class _MissingRemote:
+    def read(self, remote_path, local_dest):
+        raise cli.RemoteNotFoundError("nope")
+
+
+class _BrokenRemote:
+    def read(self, remote_path, local_dest):
+        raise cli.util.BtrbakError("network down")
+
+
+def _remote_spec(tmp_path, rid="offsite"):
+    return RemoteSpec(rid, "dir", {"type": "dir", "path": str(tmp_path / rid)})
+
+
+def _verify_setup(tmp_path, monkeypatch, snapshots, remote=None, name="root"):
+    """Build a config with a manifest, patching remote instantiation."""
+    remote = remote if remote is not None else _VerifyRemote()
+    spec = _remote_spec(tmp_path)
+    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [spec])
+    cfg = _cfg({"daily": profile})
+    cfg.name = name
+    cfg.src = tmp_path / "src"
+    cfg.dest = tmp_path / "dest"
+    cfg.tmpdir = tmp_path / "tmp"
+    for path in (cfg.src, cfg.dest, cfg.tmpdir):
+        path.mkdir(parents=True, exist_ok=True)
+    (cfg.dest / "meta.yaml").write_text(
+        yaml.safe_dump({"version": 1, "profiles": {"daily": {"snapshots": snapshots}}})
+    )
+    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda subvol=None: [cfg])
+    monkeypatch.setattr(
+        cli, "collect_remotes", lambda cfg: {"daily": [(spec, remote)]}
+    )
+    monkeypatch.setattr(cli.util, "sha256_file", lambda path: "sha")
+    return cfg, remote
+
+
+def _sent(**extra):
+    snap = {
+        "id": "s1",
+        "created": 1000,
+        "type": "full",
+        "parent": None,
+        "file": "daily/s1.send",
+        "sha256": "sha",
+        "size": 7,
+        "uploads": [{"remote": "offsite", "status": "complete"}],
+    }
+    snap.update(extra)
+    return snap
+
+
+def _verify_args(**kwargs):
+    base = {"subvol": None, "profile": None}
+    base.update(kwargs)
+    return SimpleNamespace(**base)
+
+
+def test_verify_reports_ok(tmp_path, monkeypatch, capsys):
+    _verify_setup(tmp_path, monkeypatch, [_sent()])
+    assert cli.cmd_verify(_verify_args()) == 0
+    assert "ok" in capsys.readouterr().out
+
+
+def test_verify_reports_corrupt(tmp_path, monkeypatch, capsys):
+    _verify_setup(tmp_path, monkeypatch, [_sent(sha256="other")])
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "CORRUPT" in capsys.readouterr().out
+
+
+def test_verify_reports_size_mismatch(tmp_path, monkeypatch, capsys):
+    _verify_setup(tmp_path, monkeypatch, [_sent(size=999)])
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "SIZE MISMATCH" in capsys.readouterr().out
+
+
+def test_verify_reports_missing_remote_file(tmp_path, monkeypatch, capsys):
+    _verify_setup(tmp_path, monkeypatch, [_sent()], remote=_MissingRemote())
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "MISSING" in capsys.readouterr().out
+
+
+def test_verify_reports_remote_error(tmp_path, monkeypatch, capsys):
+    _verify_setup(tmp_path, monkeypatch, [_sent()], remote=_BrokenRemote())
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "ERROR" in capsys.readouterr().out
+
+
+def test_verify_reports_broken_chain(tmp_path, monkeypatch, capsys):
+    _verify_setup(tmp_path, monkeypatch, [_sent(parent="gone")])
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "BROKEN CHAIN" in capsys.readouterr().out
+
+
+def test_verify_reports_incomplete_upload(tmp_path, monkeypatch, capsys):
+    _verify_setup(
+        tmp_path, monkeypatch, [_sent(uploads=[{"remote": "offsite", "status": "failed"}])]
+    )
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "INCOMPLETE" in capsys.readouterr().out
+
+
+def test_verify_reports_no_uploads(tmp_path, monkeypatch, capsys):
+    snap = _remote("s1", 1000)
+    snap.update({"sha256": "sha", "size": 7, "uploads": []})
+    _verify_setup(tmp_path, monkeypatch, [snap])
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "no uploads recorded" in capsys.readouterr().out
+
+
+def test_verify_reports_unknown_remote(tmp_path, monkeypatch, capsys):
+    _verify_setup(tmp_path, monkeypatch, [_sent(uploads=[{"remote": "gone", "status": "complete"}])])
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "UNKNOWN REMOTE" in capsys.readouterr().out
+
+
+def test_verify_reports_remote_snapshot_without_file(tmp_path, monkeypatch, capsys):
+    snap = _sent()
+    snap.pop("file")
+    _verify_setup(tmp_path, monkeypatch, [snap])
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "no 'file' recorded" in capsys.readouterr().out
+
+
+def test_verify_reports_missing_local_snapshot(tmp_path, monkeypatch, capsys):
+    cfg, _ = _verify_setup(tmp_path, monkeypatch, [_local("s1", 1000)])
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "MISSING local snapshot" in capsys.readouterr().out
+
+
+def test_verify_accepts_present_local_snapshot(tmp_path, monkeypatch, capsys):
+    cfg, _ = _verify_setup(tmp_path, monkeypatch, [_local("s1", 1000)])
+    (cfg.dest / "daily" / "s1").mkdir(parents=True)
+    assert cli.cmd_verify(_verify_args()) == 0
+    assert "ok" in capsys.readouterr().out
+
+
+def test_verify_reports_no_manifest_anywhere(tmp_path, monkeypatch, capsys):
+    cfg, _ = _verify_setup(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(cli, "_load_meta_for_verify", lambda cfg: (None, False))
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "no manifest found locally or on any remote" in capsys.readouterr().out
+
+
+def test_verify_uses_remote_manifest_fallback(tmp_path, monkeypatch, capsys):
+    cfg, _ = _verify_setup(tmp_path, monkeypatch, [_sent()])
+    (cfg.dest / "meta.yaml").unlink()
+    monkeypatch.setattr(cli, "_load_meta_for_verify", lambda cfg: ({"version": 1, "profiles": {}}, True))
+    assert cli.cmd_verify(_verify_args()) == 0
+    assert "verifying against a remote copy" in capsys.readouterr().out
+
+
+def test_verify_continues_past_bad_remote_config(tmp_path, monkeypatch, capsys):
+    """One broken config must not hide the result of every other config."""
+    good, _ = _verify_setup(tmp_path, monkeypatch, [_sent()], name="good")
+    bad_spec = RemoteSpec("r", "s3", {"type": "s3"})
+    bad = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400, [bad_spec])})
+    bad.name = "bad"
+    bad.dest = tmp_path / "dest"
+    bad.tmpdir = tmp_path / "tmp"
+    (bad.dest / "meta.yaml").write_text(
+        yaml.safe_dump({"version": 1, "profiles": {"daily": {"snapshots": []}}})
+    )
+    monkeypatch.setattr(
+        cli.config_mod, "discover_configs", lambda subvol=None: [bad, good]
+    )
+
+    assert cli.cmd_verify(_verify_args()) == 2
+    captured = capsys.readouterr()
+    assert "config error (bad)" in captured.out + captured.err
+    assert "unknown remote type" in captured.out + captured.err
+    assert "good: ok" in captured.out
+
+
+def test_verify_surfaces_per_config_error(tmp_path, monkeypatch, capsys):
+    cfg, _ = _verify_setup(tmp_path, monkeypatch, [])
+    (cfg.dest / "meta.yaml").write_text("not: a manifest\n")
+
+    def boom(config):
+        raise cli.util.BtrbakError("broken manifest")
+
+    monkeypatch.setattr(cli, "_load_meta_for_verify", boom)
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "error (root): broken manifest" in capsys.readouterr().err
+
+
+def test_verify_unknown_profile_raises(tmp_path, monkeypatch):
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda subvol=None: [cfg])
+    with pytest.raises(cli.config_mod.ConfigError, match="unknown profile"):
+        cli.cmd_verify(_verify_args(profile="nope"))
+
+
+def test_verify_skips_configs_without_profile(tmp_path, monkeypatch):
+    cfg = _cfg({"weekly": _profile("weekly", 86400, -1, 30 * 86400)})
+    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda subvol=None: [cfg])
+    with pytest.raises(cli.config_mod.ConfigError, match="unknown profile"):
+        cli.cmd_verify(_verify_args(profile="daily"))
+
+
+# --- list -------------------------------------------------------------------
+
+
+def _list_setup(tmp_path, monkeypatch, snapshots=None, write_manifest=True):
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg.dest = tmp_path / "dest"
+    cfg.dest.mkdir()
+    if write_manifest:
+        (cfg.dest / "meta.yaml").write_text(
+            yaml.safe_dump(
+                {"version": 1, "profiles": {"daily": {"snapshots": snapshots or []}}}
+            )
+        )
+    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda subvol=None: [cfg])
+    return cfg
+
+
+def test_cmd_list_warns_when_no_manifest(tmp_path, monkeypatch, capsys):
+    _list_setup(tmp_path, monkeypatch, write_manifest=False)
+    assert cli.cmd_list(_verify_args()) == 0
+    assert "no local manifest" in capsys.readouterr().err
+
+
+def test_cmd_list_reports_snapshot_count(tmp_path, monkeypatch, capsys):
+    _list_setup(tmp_path, monkeypatch, [_local("s1", 1000), _local("s2", 2000)])
+    assert cli.cmd_list(_verify_args()) == 0
+    assert "root/daily: (2 snapshots)" in capsys.readouterr().out
+
+
+def test_cmd_list_empty_profile_has_no_count(tmp_path, monkeypatch, capsys):
+    _list_setup(tmp_path, monkeypatch, [])
+    assert cli.cmd_list(_verify_args()) == 0
+    assert "root/daily:\n" in capsys.readouterr().out
+
+
+def test_cmd_list_indents_dependency_tree(tmp_path, monkeypatch, capsys):
+    _list_setup(
+        tmp_path,
+        monkeypatch,
+        [_local("s1", 1000), {"id": "s2", "created": 2000, "type": "incr", "parent": "s1", "uploads": []}],
+    )
+    assert cli.cmd_list(_verify_args()) == 0
+    out = capsys.readouterr().out
+    assert "  s1" in out
+    assert "    s2" in out
+
+
+def test_cmd_list_tolerates_upload_entries_without_fields(tmp_path, monkeypatch, capsys):
+    _list_setup(
+        tmp_path,
+        monkeypatch,
+        [{"id": "s1", "created": 1, "uploads": [{}]}],
+    )
+    assert cli.cmd_list(_verify_args()) == 0
+    assert "uploads=[?=?]" in capsys.readouterr().out
+
+
+def test_cmd_list_tolerates_non_numeric_created(tmp_path, monkeypatch, capsys):
+    _list_setup(tmp_path, monkeypatch, [{"id": "s1", "created": "nope"}])
+    assert cli.cmd_list(_verify_args()) == 0
+    assert "s1" in capsys.readouterr().out
+
+
+# --- config check -----------------------------------------------------------
+
+
+def test_cmd_config_check_reports_errors(monkeypatch, capsys):
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda: [cfg])
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg: (["boom"], ["careful"]))
+    assert cli.cmd_config_check(SimpleNamespace()) == 2
+    out = capsys.readouterr().out
+    assert "root:" in out
+    assert "warning: careful" in out
+    assert "error: boom" in out
+
+
+def test_cmd_config_check_ok(monkeypatch, capsys):
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda: [cfg])
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg: ([], []))
+    assert cli.cmd_config_check(SimpleNamespace()) == 0
+    assert "root:" in capsys.readouterr().out
+
+
+def test_cmd_config_check_discovery_error(monkeypatch, capsys):
+    def boom():
+        raise cli.config_mod.ConfigError("no config files")
+
+    monkeypatch.setattr(cli.config_mod, "discover_configs", boom)
+    assert cli.cmd_config_check(SimpleNamespace()) == 2
+    assert "config error" in capsys.readouterr().err
+
+
+# --- restore ----------------------------------------------------------------
+
+
+def test_cmd_restore_delegates_and_locks(tmp_path, monkeypatch):
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg.tmpdir = tmp_path / "tmp"
+    cfg.dest = tmp_path / "dest"
+    cfg.dest.mkdir()
+    cfg.tmpdir.mkdir()
+    monkeypatch.setattr(cli.config_mod, "load_auth", lambda: {})
+    monkeypatch.setattr(
+        cli.config_mod, "config_path_for_subvol", lambda subvol: Path("/x/root.yaml")
+    )
+    monkeypatch.setattr(cli.config_mod, "load_config", lambda path, auth: cfg)
+    monkeypatch.setattr(cli.config_mod, "validate_remote_config", lambda c, p=None: [])
+    calls = []
+    monkeypatch.setattr(cli.restore_mod, "run_restore", lambda *a: calls.append(a))
+
+    args = SimpleNamespace(
+        subvol="root", profile="daily", snapshot_id="s1", target=str(tmp_path / "t")
+    )
+    assert cli.cmd_restore(args) == 0
+    assert calls == [(cfg, "daily", "s1", str(tmp_path / "t"))]
+
+
+def test_cmd_restore_rejects_bad_remote_config(tmp_path, monkeypatch):
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    monkeypatch.setattr(cli.config_mod, "load_auth", lambda: {})
+    monkeypatch.setattr(
+        cli.config_mod, "config_path_for_subvol", lambda subvol: Path("/x/root.yaml")
+    )
+    monkeypatch.setattr(cli.config_mod, "load_config", lambda path, auth: cfg)
+    monkeypatch.setattr(
+        cli.config_mod,
+        "validate_remote_config",
+        lambda c, p=None: ["profile daily: remote r: unknown remote type: 's3'"],
+    )
+    args = SimpleNamespace(subvol="root", profile="daily", snapshot_id="s1", target="/t")
+    with pytest.raises(cli.config_mod.ConfigError, match="unknown remote type"):
+        cli.cmd_restore(args)
+
+
+# --- staging-directory lock -------------------------------------------------
+
+
+def _run_setup(tmp_path, monkeypatch):
+    remote = _ConfigRemote()
+    cfg, remotes = _sync_cfg(tmp_path, remote)
+    cleaned = []
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg, **kw: ([], []))
+    monkeypatch.setattr(cli, "collect_remotes", lambda cfg: {"daily": remotes})
+    monkeypatch.setattr(cli, "clean_tmpdir", lambda cfg, **kw: cleaned.append(cfg))
+    monkeypatch.setattr(cli, "push_manifest", lambda *a: None)
+    monkeypatch.setattr(cli.snapshot, "create_ro_snapshot", lambda src, dest: None)
+
+    def fake_send(snapshot, parent, out_path, compression=None, encryption=None):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b"x")
+
+    monkeypatch.setattr(cli.send, "send_snapshot", fake_send)
+    return cfg, cleaned
+
+
+def test_run_config_cleans_tmpdir_when_lock_free(tmp_path, monkeypatch):
+    cfg, cleaned = _run_setup(tmp_path, monkeypatch)
+    assert (
+        cli.run_config(cfg, None, True, True, False, False) == 0
+    )
+    assert cleaned == [cfg]
+
+
+def test_run_config_skips_tmpdir_cleanup_when_lock_held(tmp_path, monkeypatch):
+    """A running restore must be able to block the sweep, but not the backup."""
+    import fcntl
+
+    cfg, cleaned = _run_setup(tmp_path, monkeypatch)
+    lock = cfg.tmpdir / (cfg.name + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        assert cli.run_config(cfg, None, True, True, False, False) == 0
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    assert cleaned == []
+
+
+# --- main() error handling --------------------------------------------------
+
+
+def _raise(exc):
+    def _inner(args):
+        raise exc
+
+    return _inner
+
+
+def test_main_maps_config_error_to_exit_2(monkeypatch, capsys):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cli, "cmd_list", _raise(cli.config_mod.ConfigError("bad")))
+    assert cli.main(["list"]) == 2
+    assert "config error: bad" in capsys.readouterr().err
+
+
+def test_main_maps_runtime_error_to_exit_1(monkeypatch, capsys):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cli, "cmd_list", _raise(cli.util.BtrbakError("boom")))
+    assert cli.main(["list"]) == 1
+    assert "error: boom" in capsys.readouterr().err
+
+
+def test_main_maps_remote_error_to_exit_1(monkeypatch, capsys):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cli, "cmd_list", _raise(cli.RemoteError("offline")))
+    assert cli.main(["list"]) == 1
+    assert "offline" in capsys.readouterr().err
+
+
+def test_main_maps_oserror_to_exit_1(monkeypatch, capsys):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cli, "cmd_list", _raise(OSError("disk gone")))
+    assert cli.main(["list"]) == 1
+    assert "disk gone" in capsys.readouterr().err
+
+
+def test_main_rejects_non_root(monkeypatch, capsys):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 1000)
+    assert cli.main(["list"]) == 1
+    assert "must be run as root" in capsys.readouterr().err
+
+
+def test_main_reports_malformed_manifest_cleanly(monkeypatch, tmp_path, capsys):
+    """A hand-edited meta.yaml must surface as a clean error, not a traceback."""
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg.dest = tmp_path / "dest"
+    cfg.dest.mkdir()
+    (cfg.dest / "meta.yaml").write_text(
+        "version: 1\nprofiles:\n  daily:\n    snapshots:\n      - type: full\n"
+    )
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cli.config_mod, "discover_configs", lambda subvol=None: [cfg])
+
+    assert cli.main(["list"]) == 1
+    assert "non-empty string 'id'" in capsys.readouterr().err
