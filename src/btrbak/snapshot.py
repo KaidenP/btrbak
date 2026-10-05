@@ -1,6 +1,6 @@
 """btrfs subvolume snapshot management."""
 
-from util import run
+from .util import run
 
 
 def create_ro_snapshot(src, dest) -> None:

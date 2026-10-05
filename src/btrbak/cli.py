@@ -5,16 +5,16 @@ import os
 import sys
 import time
 
-import config as config_mod
-import manifest
-import restore as restore_mod
-import retention
-import send
-import snapshot
-import timespan
-import util
-from remotes import create_remote
-from remotes.base import RemoteError, RemoteNotFoundError
+from . import config as config_mod
+from . import manifest
+from . import restore as restore_mod
+from . import retention
+from . import send
+from . import snapshot
+from . import timespan
+from . import util
+from .remotes import create_remote
+from .remotes.base import RemoteError, RemoteNotFoundError
 
 VERBOSITY = 0
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from util import BtrbakError, atomic_write_text
+from .util import BtrbakError, atomic_write_text
 
 VERSION = 1
 

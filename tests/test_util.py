@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-import util
+from btrbak import util
 
 
 def test_run_missing_binary_raises_btrbak_error(monkeypatch):

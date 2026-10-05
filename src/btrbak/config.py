@@ -13,9 +13,9 @@ from pathlib import Path
 
 import yaml
 
-import timespan
-from remotes import create_remote
-from util import (
+from . import timespan
+from .remotes import create_remote
+from .util import (
     age_recipient_error,
     is_nested,
     is_subvolume,

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import restore
+from btrbak import restore
 import yaml
 
 

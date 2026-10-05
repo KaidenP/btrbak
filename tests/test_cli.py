@@ -5,9 +5,9 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-import cli
-import manifest
-from config import Config, Profile, RemoteSpec
+from btrbak import cli
+from btrbak import manifest
+from btrbak.config import Config, Profile, RemoteSpec
 
 
 def _cfg(profiles):

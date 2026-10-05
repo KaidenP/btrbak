@@ -1,6 +1,6 @@
 import pytest
 
-import timespan
+from btrbak import timespan
 
 
 @pytest.mark.parametrize(

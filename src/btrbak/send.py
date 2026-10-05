@@ -9,7 +9,7 @@ import os
 import shutil
 from pathlib import Path
 
-from util import BtrbakError, age_recipient_kind, run
+from .util import BtrbakError, age_recipient_kind, run
 
 
 def _use_xz(compression) -> bool:

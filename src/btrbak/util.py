@@ -206,17 +206,45 @@ def is_btrfs(path) -> bool:
     return btrfs_fsid(path) is not None
 
 
-def is_subvolume(path) -> bool:
-    """Return True when *path* is a btrfs subvolume."""
+def _subvolume_show(path: Path) -> str | None:
+    """Return ``btrfs subvolume show`` output for *path*, or ``None``.
+
+    ``None`` covers both "not a subvolume" and "btrfs binary not installed",
+    which are indistinguishable here and equally mean "no subvolume info".
+    """
     try:
         proc = subprocess.run(
             ["btrfs", "subvolume", "show", str(path)],
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
     except FileNotFoundError:
-        return False
-    return proc.returncode == 0
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.decode("utf-8", "replace")
+
+
+def is_subvolume(path) -> bool:
+    """Return True when *path* is a btrfs subvolume."""
+    return _subvolume_show(path) is not None
+
+
+def subvolume_uuid(path) -> str | None:
+    """Return the btrfs subvolume UUID of *path*, or ``None``.
+
+    This is the identifier ``btrfs receive`` matches an incremental parent
+    against, and it survives a send/receive round trip: a received subvolume
+    reports the sent subvolume's UUID here. Recording it in ``meta.yaml`` lets
+    ``restore`` tell a genuinely already-received link apart from an unrelated
+    subvolume that merely occupies the same name in the target.
+    """
+    text = _subvolume_show(path)
+    if text is None:
+        return None
+    # Anchored so ``Received UUID:`` is not mistaken for ``UUID:``.
+    match = re.search(r"^\s*UUID:\s*(\S+)", text, re.MULTILINE)
+    return match.group(1).strip().lower() if match else None
 
 
 def which(binary) -> bool:

@@ -1,4 +1,4 @@
-import send
+from btrbak import send
 
 
 def test_compress_decompress_roundtrip(tmp_path):

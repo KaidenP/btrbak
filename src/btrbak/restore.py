@@ -3,10 +3,10 @@
 import sys
 from pathlib import Path
 
-import manifest
-import send
-from remotes import create_remote
-from util import BtrbakError, is_btrfs, is_subvolume, sha256_file
+from . import manifest
+from . import send
+from .remotes import create_remote
+from .util import BtrbakError, is_btrfs, is_subvolume, sha256_file, subvolume_uuid
 
 
 def build_chain(meta: dict, profile_name: str, snapshot_id: str) -> list[str]:

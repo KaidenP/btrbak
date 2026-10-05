@@ -1,6 +1,6 @@
 """Dependency-preserving retention planning."""
 
-from manifest import committed, created, snapshots
+from .manifest import committed, created, snapshots
 
 
 def plan_prune(meta: dict, profile_name: str, keep: int, now_ts: int) -> list[str]:

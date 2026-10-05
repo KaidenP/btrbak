@@ -1,7 +1,7 @@
 import pytest
 import yaml
 
-import manifest
+from btrbak import manifest
 
 
 def test_default_and_roundtrip(tmp_path):

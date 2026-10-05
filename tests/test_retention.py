@@ -1,4 +1,4 @@
-from retention import plan_prune
+from btrbak.retention import plan_prune
 
 
 def _snap(sid, created, parent=None, status="complete", local=False):

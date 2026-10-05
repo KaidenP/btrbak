@@ -11,12 +11,12 @@ import subprocess
 
 import pytest
 
-import cli
-import manifest
-import restore
-import send
-import snapshot
-from config import Config, Profile, RemoteSpec
+from btrbak import cli
+from btrbak import manifest
+from btrbak import restore
+from btrbak import send
+from btrbak import snapshot
+from btrbak.config import Config, Profile, RemoteSpec
 
 pytestmark = pytest.mark.skipif(os.geteuid() != 0, reason="requires root")
 

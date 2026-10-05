@@ -1,7 +1,7 @@
 import pytest
 
-import config
-import timespan
+from btrbak import config
+from btrbak import timespan
 
 
 def _write(path, data):

@@ -1,7 +1,7 @@
 import pytest
 
-from remotes.base import RemoteError, RemoteNotFoundError
-from remotes.dir import DirRemote
+from btrbak.remotes.base import RemoteError, RemoteNotFoundError
+from btrbak.remotes.dir import DirRemote
 
 
 def _remote(tmp_path):
