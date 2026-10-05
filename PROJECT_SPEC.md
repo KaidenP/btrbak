@@ -232,12 +232,17 @@ automatically" (manual-only). `keep` must always be a positive timespan.
 - All files parse as valid YAML; required fields present and correctly typed.
 - `src` exists, is a btrfs subvolume (`btrfs subvolume show` succeeds).
 - `dest` exists or is creatable, is a **directory** (not a file), and is on the
-  **same btrfs filesystem** as `src` (same `st_dev`).
+  **same btrfs filesystem** as `src` (same `st_dev`). `dest` must **not** resolve
+  to `src` itself — snapshotting a subvolume into itself is rejected as an error,
+  not merely warned about.
 - `tmpdir` exists or is creatable, is a **directory** (not a file), and is
   writable.
 - `profiles` non-empty; `freq.full` and `freq.incr` are each `-1` ("never") or a
   positive timespan; `keep` is a positive timespan.
-- Warnings (not errors): `dest` nested inside `src`; `keep` < `freq.incr`.
+- Warnings (not errors): `dest` nested inside `src`; `keep` < `freq.incr`. The
+  nesting warning is reported once per run (§12) — `config check` prints it from
+  validation, while `run` prints it from its own nesting guard so it can be
+  combined with the 5 s grace period (§13).
 - `remotes` is optional (omit for a local-only profile). When present: each
   remote `type` is registered, `name` (if given) is unique within the profile,
   `auth` keys resolve in `auth.yaml`, and `remote.validate()` passes.
@@ -512,6 +517,10 @@ remotes, check for `age`/`xz` as needed). It does **not** require `src`,
 is missing, `restore` downloads `meta.yaml` from a configured remote before
 building the chain.
 
+The target is validated before it is created — it must either not exist or be a
+directory, and must live on a btrfs filesystem. Only then is it created, so a
+rejected target never leaves an empty directory tree behind.
+
 ---
 
 ## 11. Remote interface
@@ -567,9 +576,17 @@ btrbak list [SUBVOL] [PROFILE]
 btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 ```
 
-- Global: `--verbose/-v`.
-- `--dry-run/-n`: pure simulation — no lock acquired, no snapshots created, no
-  files written, and no remote access; prints the actions that would be taken.
+- Global: `--verbose/-v`, repeatable. Accepted either before or after the
+  subcommand (`btrbak -v run …` and `btrbak run … -v` are equivalent; the two
+  counts are summed).
+- `--dry-run/-n`: simulation — no lock acquired, no snapshots created, no
+  `meta.yaml`/snapshot/config written, and no remote *writes*; prints the actions
+  that would be taken. The single exception is a **read-only** fetch of each
+  remote's `config.yaml`, staged in a temp file that is removed immediately, so
+  that the reported sync state is real: a differing remote copy is reported as
+  the run-failing condition it is (or as an overwrite under `--force-config`),
+  rather than as a blind "would sync". A remote that cannot be read is reported
+  and does not abort the dry run.
 - Root check: if `os.geteuid() != 0`, print an error and exit `1` before doing
   anything.
 - `run` is the main entrypoint used by the external timer.
@@ -610,8 +627,9 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   `<tmpdir>/<SUBVOL>/` older than 24 h are removed.
 - `tmpdir` staging files are removed on success; on failure the snapshot is
   retained and the send is re-attempted next run.
-- If `dest` is nested inside `src`, `run` prints a warning and waits 5 s
-  (Ctrl-C aborts) before continuing.
+- If `dest` is nested inside `src`, `run` prints a single warning naming both
+  paths and waits 5 s (Ctrl-C aborts) before continuing. `config check` reports
+  the same condition without the wait.
 - A remote `config.yaml` is never silently overwritten; a differing remote copy
   is an error unless `--force-config` is passed.
 - `auth.yaml` and the age identity file should be `0600`; the tool warns if not.
@@ -643,8 +661,9 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   restore — for full and incremental chains, asserting restored content and
   that dependency-preserving pruning never orphans an incremental. Local-only
   profiles and `verify` fallback behavior are covered by unit tests.
-- CLI: root-check, arg parsing, `--dry-run` acquires no lock and touches no
-  remote.
+- CLI: root-check, arg parsing (`-v` before and after the subcommand),
+  `--dry-run` acquires no lock and writes nothing, and dry-run `config.yaml`
+  sync reporting for missing/in-sync/differing remotes.
 
 ---
 
