@@ -122,7 +122,8 @@ adds `src/remotes/s3.py` and registers a `type` string in `src/remotes/__init__.
 Location: `/etc/btrbak/profiles.d/<name>.yaml`
 
 One file = one source subvolume + its profiles. The filename stem (`<name>`) is
-the **SUBVOL** selector used on the CLI.
+the **SUBVOL** selector used on the CLI. Config files may use either `.yaml`
+or `.yml`; when both exist for the same stem, `.yaml` takes precedence.
 
 ```yaml
 # /etc/btrbak/profiles.d/root.yaml
@@ -327,16 +328,20 @@ produce its send file (both null for a local-only snapshot, which has no send
 file). Restore reads these per-snapshot settings so a later config change never
 changes how an existing backup is decoded.
 
-A snapshot is **committed** when every `uploads[].status == complete`. A
-local-only snapshot has no uploads and is committed immediately. For
-`type: local`, `file`, `sha256`, and `size` are null and `uploads` is empty.
+A snapshot is **committed** when every configured remote has a complete
+`uploads[].status == complete` record. A local-only snapshot has no uploads
+and is committed immediately. For `type: local`, `file`, `sha256`, and `size`
+are null and `uploads` is empty.
 
-When a remote is removed from a profile, its upload records are dropped from
-existing snapshots. If a remote-backed snapshot is then left with no upload
-records (all of its remotes were removed), it is recorded with
-`committed: true` so it is no longer retried and is pruned by age/dependency
-like a local snapshot; any offsite copies on the removed remote are no longer
-managed. The `committed` key is optional and defaults to false (absent).
+When a remote is added to a profile, every existing remote-backed snapshot
+gains an upload record for it (initially `failed`) and is retried on the next
+`run` until the new remote has a complete copy. When a remote is removed from
+a profile, its upload records are dropped from existing snapshots. If a
+remote-backed snapshot is then left with no upload records (all of its remotes
+were removed), it is recorded with `committed: true` so it is no longer
+retried and is pruned by age/dependency like a local snapshot; any offsite
+copies on the removed remote are no longer managed. The `committed` key is
+optional and defaults to false (absent).
 
 A snapshot may carry an optional `local_deleted: true` flag. It is set only
 when pruning deleted the local subvolume but a remote `delete` failed, so the
@@ -445,7 +450,9 @@ snapshot:
 1. `btrfs subvolume delete <dest>/<profile>/<id>` (local subvolume).
 2. `remote.delete("<profile>/<id>.send")` on every remote (skipped for a
    local-only profile).
-3. Remove the entry from `meta.yaml`; rewrite and re-upload `meta.yaml`.
+3. Remove the entry from `meta.yaml` and rewrite it locally. Once pruning
+   completes, re-upload `meta.yaml` to every remote; if pruning aborts, the
+   local manifest is still persisted so it never refers to deleted subvolumes.
 
 If a remote `delete` fails after the local subvolume was removed, the entry is
 kept in `meta.yaml` and marked `local_deleted: true` (see §8) so the remote

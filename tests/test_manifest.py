@@ -41,6 +41,16 @@ def test_committed_flag_overrides_empty_uploads():
     assert manifest.committed({"type": "full", "committed": True, "uploads": []})
 
 
+def test_committed_local_deleted():
+    assert manifest.committed(
+        {
+            "type": "full",
+            "local_deleted": True,
+            "uploads": [{"remote": "r", "status": "failed"}],
+        }
+    )
+
+
 def test_last_committed_skips_local_deleted():
     meta = manifest.default()
     manifest.add_snapshot(

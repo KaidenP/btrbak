@@ -354,6 +354,64 @@ def test_reconcile_uploads_empty_uploads_with_remotes_not_committed():
     assert not manifest.committed(snap)
 
 
+def test_reconcile_uploads_backfills_new_remote():
+    snap = {"type": "full", "uploads": [{"remote": "r", "status": "complete"}]}
+    cli.reconcile_uploads(snap, {"r", "r2"})
+    assert snap["uploads"] == [
+        {"remote": "r", "status": "complete"},
+        {"remote": "r2", "status": "failed"},
+    ]
+    assert not manifest.committed(snap)
+
+
+def test_reconcile_uploads_backfills_after_all_remotes_removed():
+    snap = {"type": "full", "committed": True, "uploads": []}
+    cli.reconcile_uploads(snap, {"r"})
+    assert snap["uploads"] == [{"remote": "r", "status": "failed"}]
+    assert "committed" not in snap
+    assert not manifest.committed(snap)
+
+
+def test_reconcile_uploads_does_not_backfill_local_deleted():
+    snap = {
+        "type": "full",
+        "local_deleted": True,
+        "uploads": [{"remote": "r", "status": "complete"}],
+    }
+    cli.reconcile_uploads(snap, {"r", "r2"})
+    assert snap["uploads"] == [{"remote": "r", "status": "complete"}]
+    assert manifest.committed(snap)
+
+
+def test_cmd_run_continues_after_config_error(monkeypatch, capsys):
+    cfg_bad = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg_good = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    monkeypatch.setattr(
+        cli.config_mod, "discover_configs", lambda subvol=None: [cfg_bad, cfg_good]
+    )
+    ran = []
+
+    def fake_run_config(cfg, *args, **kwargs):
+        ran.append(cfg)
+        if cfg is cfg_bad:
+            raise cli.config_mod.ConfigError("bad")
+        return 0
+
+    monkeypatch.setattr(cli, "run_config", fake_run_config)
+    args = SimpleNamespace(
+        subvol=None,
+        profile=None,
+        force=False,
+        force_config=False,
+        full=False,
+        dry_run=False,
+    )
+
+    assert cli.cmd_run(args) == 2
+    assert ran == [cfg_bad, cfg_good]
+    assert "config error" in capsys.readouterr().err
+
+
 def test_prune_marks_local_deleted_when_remote_delete_fails(tmp_path, monkeypatch):
     profile = _profile(
         "daily", 7 * 86400, 86400, 1, [RemoteSpec("r", "dir", {"path": "/x"})]
@@ -396,6 +454,70 @@ def test_prune_marks_local_deleted_when_remote_delete_fails(tmp_path, monkeypatc
     assert len(deleted) == 1
     assert meta["profiles"]["daily"]["snapshots"][0]["local_deleted"] is True
     assert manifest.last_committed(meta, "daily") is None
+
+
+def test_prune_persists_progress_when_local_delete_fails(tmp_path, monkeypatch):
+    profile = _profile(
+        "daily", 7 * 86400, 86400, 1, [RemoteSpec("r", "dir", {"path": "/x"})]
+    )
+    cfg = _cfg({"daily": profile})
+    cfg.dest = tmp_path / "snapshots"
+    cfg.tmpdir = tmp_path / "tmp"
+    meta_path = cfg.dest / "meta.yaml"
+    meta = {
+        "version": 1,
+        "profiles": {
+            "daily": {
+                "snapshots": [
+                    {
+                        "id": "s1",
+                        "created": 1000,
+                        "type": "full",
+                        "parent": None,
+                        "file": "daily/s1.send",
+                        "uploads": [{"remote": "r", "status": "complete"}],
+                    },
+                    {
+                        "id": "s2",
+                        "created": 2000,
+                        "type": "incr",
+                        "parent": "s1",
+                        "file": "daily/s2.send",
+                        "uploads": [{"remote": "r", "status": "complete"}],
+                    },
+                ]
+            }
+        }
+    }
+    (cfg.dest / "daily" / "s1").mkdir(parents=True)
+    (cfg.dest / "daily" / "s2").mkdir(parents=True)
+    manifest.save(meta_path, meta)
+
+    calls = []
+
+    def fake_delete(path):
+        calls.append(path)
+        if len(calls) == 2:
+            raise cli.util.BtrbakError("boom")
+
+    monkeypatch.setattr(cli.snapshot, "delete_snapshot", fake_delete)
+    monkeypatch.setattr(cli.util, "now", lambda: 5000)
+
+    class OkRemote:
+        def delete(self, remote_path):
+            pass
+
+    by_profile = {
+        "daily": [(RemoteSpec("r", "dir", {"path": "/x"}), OkRemote())]
+    }
+
+    with pytest.raises(cli.util.BtrbakError):
+        cli.prune(cfg, meta, by_profile, meta_path)
+
+    # The first (leaf) deletion must already be persisted even though the
+    # second local delete aborted the prune.
+    on_disk = manifest.load(meta_path)
+    assert [s["id"] for s in manifest.snapshots(on_disk, "daily")] == ["s1"]
 
 
 def test_cmd_list_skips_configs_without_profile(monkeypatch, capsys):

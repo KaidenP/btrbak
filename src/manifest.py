@@ -26,7 +26,22 @@ def load(path) -> dict:
         raise BtrbakError("meta.yaml must be a mapping")
     if data.get("version") != VERSION:
         raise BtrbakError(f"unsupported meta.yaml version: {data.get('version')!r}")
-    data.setdefault("profiles", {})
+    profiles = data.get("profiles")
+    if profiles is None:
+        profiles = {}
+        data["profiles"] = profiles
+    if not isinstance(profiles, dict):
+        raise BtrbakError("meta.yaml 'profiles' must be a mapping")
+    for name, entry in profiles.items():
+        if not isinstance(entry, dict):
+            raise BtrbakError(f"meta.yaml profile {name!r} must be a mapping")
+        snapshots = entry.get("snapshots")
+        if snapshots is None:
+            entry["snapshots"] = []
+        elif not isinstance(snapshots, list):
+            raise BtrbakError(
+                f"meta.yaml profile {name!r} 'snapshots' must be a list"
+            )
     return data
 
 
@@ -66,6 +81,8 @@ def remove_snapshot(meta: dict, name: str, snapshot_id: str) -> None:
 
 def committed(snapshot: dict) -> bool:
     if snapshot.get("committed"):
+        return True
+    if snapshot.get("local_deleted"):
         return True
     if snapshot.get("type") == "local":
         return True

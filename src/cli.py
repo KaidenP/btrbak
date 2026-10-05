@@ -101,19 +101,33 @@ def cmd_run(args) -> int:
     if args.profile and not selected_configs:
         raise config_mod.ConfigError(f"unknown profile: {args.profile!r}")
 
-    failures = 0
+    upload_failures = 0
+    runtime_failures = 0
+    config_errors = 0
     for cfg in selected_configs:
-        failures += run_config(
-            cfg,
-            None,
-            args.force,
-            args.force_config,
-            args.full,
-            args.dry_run,
+        try:
+            upload_failures += run_config(
+                cfg,
+                None,
+                args.force,
+                args.force_config,
+                args.full,
+                args.dry_run,
+            )
+        except config_mod.ConfigError as exc:
+            config_errors += 1
+            print(f"config error ({cfg.name}): {exc}", file=sys.stderr)
+        except (util.BtrbakError, RemoteError, OSError) as exc:
+            runtime_failures += 1
+            print(f"error ({cfg.name}): {exc}", file=sys.stderr)
+    if upload_failures:
+        print(
+            f"warning: {upload_failures} upload(s) failed; see errors above",
+            file=sys.stderr,
         )
-    if failures:
-        print(f"warning: {failures} upload(s) failed; see errors above", file=sys.stderr)
-    return 1 if failures else 0
+    if config_errors:
+        return 2
+    return 1 if upload_failures or runtime_failures else 0
 
 
 def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
@@ -178,7 +192,14 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
                 manifest.save(meta_path, meta)
                 _push_manifest_best_effort(meta_path, by_profile)
 
-        prune(selected, meta, by_profile)
+        try:
+            prune(selected, meta, by_profile, meta_path)
+        except BaseException:
+            # Persist any deletions already applied before re-raising so the
+            # on-disk manifest never refers to subvolumes that were removed.
+            manifest.save(meta_path, meta)
+            _push_manifest_best_effort(meta_path, by_profile)
+            raise
         manifest.save(meta_path, meta)
         push_manifest(meta_path, by_profile)
     return failures
@@ -378,17 +399,15 @@ def retry_upload(cfg, profile, snap, remotes) -> int:
 
 
 def reconcile_uploads(snap, current_ids) -> None:
-    """Drop upload records for remotes no longer configured.
+    """Reconcile upload records against the currently configured remotes.
 
-    Removing a remote must not strand a snapshot in an uncommitted state;
-    prune stale upload records so the snapshot can be retried against (or
-    committed by) the remotes that remain. When duplicate records exist for a
-    remote, keep the most favourable (``complete``) status.
-
-    A remote-backed snapshot whose upload records all referenced removed
-    remotes has no remaining offsite target to retry, so it is marked
-    ``committed`` and subsequently pruned by age/dependency like a local
-    snapshot.
+    - Drop records for remotes that were removed.
+    - De-duplicate records for a remote, keeping the most favourable status.
+    - Add a ``failed`` record for every newly configured remote so existing
+      snapshots are backfilled to it on the next retry.
+    - Mark a remote-backed snapshot ``committed`` only when no remotes remain
+      to upload to (all were removed). A ``local_deleted`` snapshot is never
+      backfilled because its local subvolume is already gone.
     """
     uploads = snap.get("uploads", [])
     best = {}
@@ -405,14 +424,28 @@ def reconcile_uploads(snap, current_ids) -> None:
             and best[remote_id].get("status") != "complete"
         ):
             best[remote_id] = upload
+
+    if snap.get("type") != "local" and not snap.get("local_deleted"):
+        if current_ids:
+            for rid in current_ids:
+                if rid not in best:
+                    best[rid] = {"remote": rid, "status": "failed"}
+                    order.append(rid)
+            snap.pop("committed", None)
+        elif not best:
+            snap["committed"] = True
+
     kept = [best[rid] for rid in order]
     if kept != uploads:
         snap["uploads"] = kept
-    if snap.get("type") != "local" and not kept and not current_ids:
-        snap["committed"] = True
 
 
-def prune(cfg, meta, by_profile) -> None:
+def prune(cfg, meta, by_profile, meta_path=None) -> None:
+    """Delete expired snapshots and persist the manifest after each change.
+
+    ``meta_path``, when provided, is rewritten after every manifest mutation so
+    an aborted prune never leaves on-disk state pointing at deleted subvolumes.
+    """
     now_ts = util.now()
     for pname, profile in cfg.profiles.items():
         for sid in retention.plan_prune(meta, pname, profile.keep, now_ts):
@@ -437,8 +470,15 @@ def prune(cfg, meta, by_profile) -> None:
                 # (its local data no longer exists).
                 if snap:
                     snap["local_deleted"] = True
+                _save_prune_meta(meta_path, meta)
                 break
             manifest.remove_snapshot(meta, pname, sid)
+            _save_prune_meta(meta_path, meta)
+
+
+def _save_prune_meta(meta_path, meta) -> None:
+    if meta_path is not None:
+        manifest.save(meta_path, meta)
 
 
 # --- helpers ---------------------------------------------------------------
@@ -577,7 +617,7 @@ def cmd_config_check(args) -> int:
     try:
         configs = config_mod.discover_configs()
     except config_mod.ConfigError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"config error: {exc}", file=sys.stderr)
         return 2
 
     return_code = 0
