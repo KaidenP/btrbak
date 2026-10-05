@@ -581,3 +581,141 @@ def test_sync_settings_conflict_is_runtime_error(tmp_path):
             [(RemoteSpec("r", "dir", {"path": "/x"}), ConflictRemote())],
             force_config=False,
         )
+
+
+# --- config.yaml sync state (shared by `run` and `--dry-run`) --------------
+
+
+class _ConfigRemote:
+    """Minimal remote recording reads/writes of ``config.yaml``."""
+
+    def __init__(self, stored=None, read_error=None):
+        self.stored = stored
+        self.read_error = read_error
+        self.writes = []
+
+    def read(self, remote_path, local_dest):
+        if self.read_error is not None:
+            raise self.read_error
+        if self.stored is None:
+            raise cli.RemoteNotFoundError("missing")
+        local_dest.write_bytes(self.stored)
+
+    def write(self, local_src, remote_path):
+        self.stored = Path(local_src).read_bytes()
+        self.writes.append(remote_path)
+
+
+def _sync_cfg(tmp_path, remote):
+    profile = _profile(
+        "daily", 7 * 86400, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})]
+    )
+    cfg = _cfg({"daily": profile})
+    cfg.src = tmp_path / "src"
+    cfg.dest = tmp_path / "dest"
+    cfg.tmpdir = tmp_path / "tmp"
+    cfg.path = tmp_path / "root.yaml"
+    cfg.path.write_text("src: /x\n")
+    for path in (cfg.src, cfg.dest, cfg.tmpdir):
+        path.mkdir(parents=True)
+    spec = cfg.profiles["daily"].remotes[0]
+    return cfg, [(spec, remote)]
+
+
+def test_dry_run_reports_missing_config(capsys, tmp_path):
+    remote = _ConfigRemote()
+    cfg, remotes = _sync_cfg(tmp_path, remote)
+    cli.dry_run_config_sync(cfg, {"daily": remotes}, force_config=False)
+    assert "would upload config.yaml to remote r" in capsys.readouterr().out
+    assert remote.writes == []
+
+
+def test_dry_run_reports_in_sync_config(capsys, tmp_path):
+    remote = _ConfigRemote(stored=b"src: /x\n")
+    cfg, remotes = _sync_cfg(tmp_path, remote)
+    cli.dry_run_config_sync(cfg, {"daily": remotes}, force_config=False)
+    assert "config.yaml already in sync on remote r" in capsys.readouterr().out
+    assert remote.writes == []
+
+
+def test_dry_run_warns_when_config_differs(capsys, tmp_path):
+    remote = _ConfigRemote(stored=b"tampered\n")
+    cfg, remotes = _sync_cfg(tmp_path, remote)
+    cli.dry_run_config_sync(cfg, {"daily": remotes}, force_config=False)
+    err = capsys.readouterr().err
+    assert "has a differing config.yaml" in err
+    assert "without --force-config" in err
+    assert remote.writes == []
+
+
+def test_dry_run_reports_overwrite_with_force_config(capsys, tmp_path):
+    remote = _ConfigRemote(stored=b"tampered\n")
+    cfg, remotes = _sync_cfg(tmp_path, remote)
+    cli.dry_run_config_sync(cfg, {"daily": remotes}, force_config=True)
+    assert "would overwrite differing config.yaml on remote r" in capsys.readouterr().out
+    assert remote.writes == []
+
+
+def test_dry_run_survives_unreachable_remote(capsys, tmp_path):
+    remote = _ConfigRemote(read_error=cli.util.BtrbakError("network down"))
+    cfg, remotes = _sync_cfg(tmp_path, remote)
+    cli.dry_run_config_sync(cfg, {"daily": remotes}, force_config=False)
+    assert "could not read config.yaml from remote r" in capsys.readouterr().err
+
+
+def test_dry_run_leaves_no_temp_file_behind(tmp_path):
+    remote = _ConfigRemote(stored=b"tampered\n")
+    cfg, remotes = _sync_cfg(tmp_path, remote)
+    cli.dry_run_config_sync(cfg, {"daily": remotes}, force_config=False)
+    assert not (cfg.tmpdir / cfg.name / "config.yaml.dry-run").exists()
+
+
+def test_sync_settings_uploads_when_missing(tmp_path):
+    remote = _ConfigRemote()
+    cfg, remotes = _sync_cfg(tmp_path, remote)
+    cli.sync_settings(cfg, remotes, force_config=False)
+    assert remote.writes == ["config.yaml"]
+    assert remote.stored == b"src: /x\n"
+
+
+def test_sync_settings_skips_identical_config(tmp_path):
+    remote = _ConfigRemote(stored=b"src: /x\n")
+    cfg, remotes = _sync_cfg(tmp_path, remote)
+    cli.sync_settings(cfg, remotes, force_config=False)
+    assert remote.writes == []
+
+
+def test_sync_settings_overwrites_with_force_config(tmp_path):
+    remote = _ConfigRemote(stored=b"tampered\n")
+    cfg, remotes = _sync_cfg(tmp_path, remote)
+    cli.sync_settings(cfg, remotes, force_config=True)
+    assert remote.stored == b"src: /x\n"
+
+
+def test_run_config_warns_about_nesting_exactly_once(tmp_path, monkeypatch, capsys):
+    remote = _ConfigRemote()
+    cfg, remotes = _sync_cfg(tmp_path, remote)
+    cfg.dest = cfg.src / "snapshots"
+    cfg.dest.mkdir()
+
+    monkeypatch.setattr(cli.config_mod, "is_nested", lambda inner, outer: True)
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg, **kw: ([], []))
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(cli, "collect_remotes", lambda cfg: {"daily": remotes})
+
+    cli.run_config(cfg, None, force=True, force_config=True, full=False, dry_run=True)
+    assert capsys.readouterr().err.count("nested inside src") == 1
+
+
+def test_run_config_dry_run_does_not_sleep(tmp_path, monkeypatch, capsys):
+    remote = _ConfigRemote()
+    cfg, _remotes = _sync_cfg(tmp_path, remote)
+    slept = []
+    monkeypatch.setattr(cli.config_mod, "is_nested", lambda inner, outer: True)
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg, **kw: ([], []))
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: slept.append(seconds))
+    monkeypatch.setattr(cli, "collect_remotes", lambda cfg: {})
+
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=True)
+    assert slept == []
+    assert "Ctrl-C" not in capsys.readouterr().err

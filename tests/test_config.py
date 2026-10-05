@@ -416,3 +416,17 @@ def test_validate_rejects_dest_equal_to_src_via_trailing_slash(tmp_path):
     cfg = _validate_cfg(tmp_path, str(tmp_path / "src") + "/")
     errors, _warnings = config.validate(cfg, check_remotes=False)
     assert any("dest must not be the same path as src" in error for error in errors)
+
+
+def test_validate_nesting_warning_can_be_suppressed(tmp_path, monkeypatch):
+    nested = tmp_path / "src" / "snapshots"
+    nested.mkdir(parents=True)
+    cfg = _validate_cfg(tmp_path, nested)
+    # The nesting check lives behind the btrfs/subvolume branch of validate().
+    monkeypatch.setattr(config, "is_subvolume", lambda path: True)
+
+    _errors, warnings = config.validate(cfg, check_remotes=False, check_nesting=True)
+    assert any("nested inside src" in warning for warning in warnings)
+
+    _errors, warnings = config.validate(cfg, check_remotes=False, check_nesting=False)
+    assert not any("nested inside src" in warning for warning in warnings)

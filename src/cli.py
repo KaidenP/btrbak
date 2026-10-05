@@ -132,27 +132,33 @@ def cmd_run(args) -> int:
 
 def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
     selected = config_mod.filter_profiles(cfg, profile_filter)
-    errors, warnings = config_mod.validate(selected, check_remotes=not dry_run)
+    errors, warnings = config_mod.validate(
+        selected, check_remotes=not dry_run, check_nesting=False
+    )
     if errors:
         raise config_mod.ConfigError("\n".join(errors))
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
 
+    # The nesting warning is emitted here rather than by validate() so a run
+    # reports it exactly once, together with the 5s grace period.
     if config_mod.is_nested(selected.dest, selected.src):
+        message = (
+            f"warning: dest is nested inside src ({selected.dest}); "
+            "snapshots may be picked up as nested subvolumes"
+        )
         if dry_run:
-            print("warning: dest is nested inside src; would wait 5s", file=sys.stderr)
+            print(message, file=sys.stderr)
         else:
-            print(
-                "warning: dest is nested inside src; Ctrl-C within 5s to abort",
-                file=sys.stderr,
-            )
+            print(f"{message}; Ctrl-C within 5s to abort", file=sys.stderr)
             time.sleep(5)
 
     if dry_run:
         meta = manifest.load(selected.dest / "meta.yaml")
+        now_ts = util.now()
         for pname, profile in selected.profiles.items():
             due, stype, parent = compute_plan(
-                selected, profile, meta, util.now(), force, full
+                selected, profile, meta, now_ts, force, full
             )
             if due:
                 print(
@@ -162,16 +168,10 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
             else:
                 print(f"[dry-run] {selected.name}/{pname}: nothing due")
 
-        seen = set()
-        for profile in selected.profiles.values():
-            for spec in profile.remotes:
-                key = config_mod.remote_identity(spec)
-                if key not in seen:
-                    seen.add(key)
-                    print(f"[dry-run] would sync config.yaml to remote {spec.id}")
+        dry_run_config_sync(selected, collect_remotes(selected), force_config)
 
         for pname, profile in selected.profiles.items():
-            for sid in retention.plan_prune(meta, pname, profile.keep, util.now()):
+            for sid in retention.plan_prune(meta, pname, profile.keep, now_ts):
                 print(f"[dry-run] {selected.name}/{pname}: would prune snapshot {sid}")
         return 0
 
@@ -510,29 +510,74 @@ def unique_remotes(by_profile):
     return unique
 
 
+def _config_sync_state(remote, local_bytes, tmp) -> str:
+    """Classify how the remote's ``config.yaml`` compares to *local_bytes*.
+
+    Returns ``"missing"`` when the remote has no copy yet, ``"in-sync"`` when
+    the bytes are identical, and ``"differs"`` otherwise. *tmp* is a scratch
+    path for the download; the caller owns it.
+    """
+    try:
+        remote.read("config.yaml", tmp)
+    except RemoteNotFoundError:
+        return "missing"
+    return "in-sync" if tmp.read_bytes() == local_bytes else "differs"
+
+
 def sync_settings(cfg, remotes, force_config) -> None:
     local_bytes = cfg.path.read_bytes()
     for spec, remote in remotes:
         tmp = cfg.tmpdir / cfg.name / "config.yaml.check"
         tmp.parent.mkdir(parents=True, exist_ok=True)
         try:
-            try:
-                remote.read("config.yaml", tmp)
-            except RemoteNotFoundError:
-                remote.write(cfg.path, "config.yaml")
-                continue
-            remote_bytes = tmp.read_bytes()
+            state = _config_sync_state(remote, local_bytes, tmp)
         finally:
             tmp.unlink(missing_ok=True)
 
-        if remote_bytes == local_bytes:
-            continue
-        if not force_config:
+        if state == "missing" or (state == "differs" and force_config):
+            remote.write(cfg.path, "config.yaml")
+        elif state == "differs":
             raise util.BtrbakError(
                 f"remote {spec.id} already has a different config.yaml; "
                 "use --force-config to overwrite"
             )
-        remote.write(cfg.path, "config.yaml")
+
+
+def dry_run_config_sync(cfg, by_profile, force_config) -> None:
+    """Report what ``sync_settings`` would do for each remote, without writing.
+
+    This is the only remote access ``--dry-run`` performs and it is strictly
+    read-only: the downloaded copy is staged in a temp file that is removed
+    again immediately. Reporting the real state matters because a differing
+    remote ``config.yaml`` aborts a real run unless ``--force-config`` is given.
+    """
+    local_bytes = cfg.path.read_bytes()
+    for spec, remote in unique_remotes(by_profile):
+        tmp = cfg.tmpdir / cfg.name / "config.yaml.dry-run"
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            state = _config_sync_state(remote, local_bytes, tmp)
+        except Exception as exc:  # noqa: BLE001 - a dry run must not fail hard
+            print(
+                f"[dry-run] could not read config.yaml from remote {spec.id}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        finally:
+            tmp.unlink(missing_ok=True)
+
+        if state == "missing":
+            print(f"[dry-run] would upload config.yaml to remote {spec.id}")
+        elif state == "in-sync":
+            print(f"[dry-run] config.yaml already in sync on remote {spec.id}")
+        elif force_config:
+            print(f"[dry-run] would overwrite differing config.yaml on remote {spec.id}")
+        else:
+            print(
+                f"[dry-run] remote {spec.id} has a differing config.yaml; "
+                "this run would fail without --force-config",
+                file=sys.stderr,
+            )
 
 
 def push_manifest(meta_path, by_profile) -> None:

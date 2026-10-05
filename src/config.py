@@ -280,8 +280,12 @@ def _normalize_encryption(encryption, path) -> dict | None:
 # --- validation ------------------------------------------------------------
 
 
-def validate(config: Config, check_remotes=True):
-    """Return ``(errors, warnings)`` for a config."""
+def validate(config: Config, check_remotes=True, check_nesting=True):
+    """Return ``(errors, warnings)`` for a config.
+
+    ``check_nesting`` is disabled by ``run``, which reports the nesting
+    condition itself so that a run prints it exactly once (§13).
+    """
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -310,7 +314,7 @@ def validate(config: Config, check_remotes=True):
                 errors.append(
                     f"dest must be on the same btrfs filesystem as src: {config.dest}"
                 )
-        if is_nested(config.dest, config.src):
+        if check_nesting and is_nested(config.dest, config.src):
             warnings.append(
                 f"dest is nested inside src ({config.dest}); snapshots may be picked up as nested subvolumes"
             )
