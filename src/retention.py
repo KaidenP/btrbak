@@ -1,6 +1,6 @@
 """Dependency-preserving retention planning."""
 
-from manifest import committed, snapshots
+from manifest import committed, created, snapshots
 
 
 def plan_prune(meta: dict, profile_name: str, keep: int, now_ts: int) -> list[str]:
@@ -10,7 +10,7 @@ def plan_prune(meta: dict, profile_name: str, keep: int, now_ts: int) -> list[st
     and all of its uploads are complete. Deleting a leaf may make its parent
     deletable, so this repeats until a fixed point is reached.
     """
-    snaps = list(snapshots(meta, profile_name))
+    snaps = [snap for snap in snapshots(meta, profile_name) if snap.get("id")]
     remaining = {snap["id"] for snap in snaps}
     order: list[str] = []
 
@@ -24,13 +24,13 @@ def plan_prune(meta: dict, profile_name: str, keep: int, now_ts: int) -> list[st
             snap
             for snap in snaps
             if snap["id"] in remaining
-            and now_ts - snap.get("created", 0) >= keep
+            and now_ts - created(snap) >= keep
             and snap["id"] not in parents
             and committed(snap)
         ]
         if not candidates:
             break
-        candidates.sort(key=lambda snap: snap.get("created", 0), reverse=True)
+        candidates.sort(key=created, reverse=True)
         victim = candidates[0]
         remaining.discard(victim["id"])
         order.append(victim["id"])

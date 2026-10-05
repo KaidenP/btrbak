@@ -1,4 +1,5 @@
 import pytest
+import yaml
 
 import manifest
 
@@ -125,3 +126,70 @@ def test_profile_entry_roundtrips_key_order(tmp_path):
     text = path.read_text()
     assert text.index("src:") < text.index("snapshots:")
     assert manifest.load(path)["profiles"]["daily"]["src"] == "/mnt/data"
+
+
+# --- structural validation --------------------------------------------------
+
+
+def _write_meta(tmp_path, snapshots, name="p"):
+    path = tmp_path / "meta.yaml"
+    path.write_text(
+        yaml.safe_dump({"version": 1, "profiles": {name: {"snapshots": snapshots}}})
+    )
+    return path
+
+
+def test_load_rejects_snapshot_without_id(tmp_path):
+    path = _write_meta(tmp_path, [{"type": "full"}])
+    with pytest.raises(manifest.BtrbakError, match="non-empty string 'id'"):
+        manifest.load(path)
+
+
+def test_load_rejects_snapshot_with_empty_id(tmp_path):
+    path = _write_meta(tmp_path, [{"id": "", "type": "full"}])
+    with pytest.raises(manifest.BtrbakError, match="non-empty string 'id'"):
+        manifest.load(path)
+
+
+def test_load_rejects_non_mapping_snapshot(tmp_path):
+    path = _write_meta(tmp_path, ["not-a-mapping"])
+    with pytest.raises(manifest.BtrbakError, match="must be a mapping"):
+        manifest.load(path)
+
+
+def test_load_rejects_duplicate_snapshot_ids(tmp_path):
+    path = _write_meta(tmp_path, [{"id": "a"}, {"id": "a"}])
+    with pytest.raises(manifest.BtrbakError, match="duplicate snapshot id"):
+        manifest.load(path)
+
+
+def test_load_rejects_non_string_parent(tmp_path):
+    path = _write_meta(tmp_path, [{"id": "a", "parent": 7}])
+    with pytest.raises(manifest.BtrbakError, match="'parent' must be a string"):
+        manifest.load(path)
+
+
+def test_load_rejects_non_list_uploads(tmp_path):
+    path = _write_meta(tmp_path, [{"id": "a", "uploads": "nope"}])
+    with pytest.raises(manifest.BtrbakError, match="'uploads' must be a list"):
+        manifest.load(path)
+
+
+def test_load_rejects_non_mapping_upload(tmp_path):
+    path = _write_meta(tmp_path, [{"id": "a", "uploads": ["nope"]}])
+    with pytest.raises(manifest.BtrbakError, match="each upload must be a mapping"):
+        manifest.load(path)
+
+
+def test_load_normalises_missing_snapshots_list(tmp_path):
+    path = _write_meta(tmp_path, [])
+    meta = manifest.load(path)
+    assert manifest.snapshots(meta, "p") == []
+
+
+def test_created_tolerates_bad_values():
+    assert manifest.created({"created": 5}) == 5
+    assert manifest.created({}) == 0
+    assert manifest.created({"created": "nope"}) == 0
+    assert manifest.created({"created": None}) == 0
+    assert manifest.created({"created": True}) == 0

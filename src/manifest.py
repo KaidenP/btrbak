@@ -38,11 +38,48 @@ def load(path) -> dict:
         snapshots = entry.get("snapshots")
         if snapshots is None:
             entry["snapshots"] = []
-        elif not isinstance(snapshots, list):
+            continue
+        if not isinstance(snapshots, list):
             raise BtrbakError(
                 f"meta.yaml profile {name!r} 'snapshots' must be a list"
             )
+        _validate_snapshots(name, snapshots)
     return data
+
+
+def _validate_snapshots(profile_name: str, snapshots: list) -> None:
+    """Reject snapshot entries that are not usable.
+
+    ``id`` is mandatory and unique: retention planning, the dependency tree and
+    restore chain building all key off it, so a malformed entry (e.g. from a
+    hand-edited manifest) must fail loudly here rather than as a ``KeyError``
+    deep inside a command.
+    """
+    seen = set()
+    for index, snap in enumerate(snapshots):
+        where = f"meta.yaml profile {profile_name!r} snapshot #{index}"
+        if not isinstance(snap, dict):
+            raise BtrbakError(f"{where} must be a mapping")
+        sid = snap.get("id")
+        if not isinstance(sid, str) or not sid:
+            raise BtrbakError(f"{where} must have a non-empty string 'id'")
+        if sid in seen:
+            raise BtrbakError(
+                f"meta.yaml profile {profile_name!r} has duplicate snapshot id {sid!r}"
+            )
+        seen.add(sid)
+        parent = snap.get("parent")
+        if parent is not None and not isinstance(parent, str):
+            raise BtrbakError(f"{where} ({sid}) 'parent' must be a string or null")
+        uploads = snap.get("uploads", [])
+        if uploads is None:
+            uploads = []
+            snap["uploads"] = uploads
+        if not isinstance(uploads, list):
+            raise BtrbakError(f"{where} ({sid}) 'uploads' must be a list")
+        for upload in uploads:
+            if not isinstance(upload, dict):
+                raise BtrbakError(f"{where} ({sid}) each upload must be a mapping")
 
 
 def save(path, meta: dict) -> None:
@@ -82,6 +119,17 @@ def remove_snapshot(meta: dict, name: str, snapshot_id: str) -> None:
     entry["snapshots"] = [
         snap for snap in entry.get("snapshots", []) if snap.get("id") != snapshot_id
     ]
+
+
+def created(snapshot: dict) -> int:
+    """Return a snapshot's ``created`` epoch, tolerating a missing/bad value.
+
+    Retention and due-date arithmetic all key off this field, so a
+    non-numeric value must degrade to ``0`` (oldest possible) rather than
+    raising deep inside a command.
+    """
+    value = snapshot.get("created", 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def committed(snapshot: dict) -> bool:
