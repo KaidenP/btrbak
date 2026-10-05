@@ -27,6 +27,11 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 python -m pytest
 ```
 
-End-to-end tests against a real btrfs filesystem (loopback mount) are planned
-but not wired up yet; the current suite covers parsing, config, retention,
-manifest, remote mapping, and the compression codec.
+End-to-end tests against a real btrfs filesystem (loopback mount) live in
+`tests/integration/test_btrfs.py` and run automatically as root; they skip when
+not running as root or when btrfs tooling is unavailable. Run them explicitly
+with:
+
+```
+sudo python -m pytest tests/integration/test_btrfs.py
+```
