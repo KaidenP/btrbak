@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 from .base import Remote, RemoteError, RemoteNotFoundError
@@ -46,23 +47,21 @@ class DirRemote(Remote):
     def write(self, local_src: Path, remote_path: str) -> None:
         destination = self._resolve(remote_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        tmp = destination.parent / (destination.name + ".tmp-btrbak")
-        shutil.copyfile(local_src, tmp)
-        os.replace(tmp, destination)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(destination.parent),
+            prefix=destination.name + ".",
+            suffix=".tmp",
+        )
+        os.close(fd)
+        try:
+            shutil.copyfile(local_src, tmp_name)
+            os.replace(tmp_name, destination)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
     def delete(self, remote_path: str) -> None:
         try:
             self._resolve(remote_path).unlink()
         except FileNotFoundError:
             pass
-
-    def list(self, prefix: str = "") -> list[str]:
-        base = self._resolve(prefix) if prefix else self.root
-        if not base.exists():
-            return []
-        results = []
-        for root, _dirs, files in os.walk(base):
-            for name in files:
-                full = Path(root) / name
-                results.append(full.relative_to(self.root).as_posix())
-        return sorted(results)

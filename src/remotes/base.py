@@ -38,7 +38,3 @@ class Remote(ABC):
     @abstractmethod
     def delete(self, remote_path: str) -> None:
         """Delete *remote_path*; a missing file is not an error."""
-
-    @abstractmethod
-    def list(self, prefix: str = "") -> list[str]:
-        """Return logical paths under *prefix*."""

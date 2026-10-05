@@ -34,16 +34,6 @@ def test_delete_is_idempotent(tmp_path):
     remote.delete("a/b.send")
 
 
-def test_list(tmp_path):
-    remote = _remote(tmp_path)
-    src = tmp_path / "in.bin"
-    src.write_bytes(b"x")
-    remote.write(src, "meta.yaml")
-    remote.write(src, "daily/1.send")
-    assert remote.list() == ["daily/1.send", "meta.yaml"]
-    assert remote.list("daily") == ["daily/1.send"]
-
-
 def test_path_traversal_rejected(tmp_path):
     remote = _remote(tmp_path)
     with pytest.raises(RemoteError):
