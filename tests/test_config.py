@@ -267,6 +267,45 @@ def test_filter_profiles_unknown_raises(tmp_path):
         config.filter_profiles(cfg, "nope")
 
 
+def test_select_profiles_returns_none_when_absent(tmp_path):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": "/mnt/data",
+            "dest": "/mnt/data/.snapshots",
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        },
+    )
+    cfg = config.load_config(cfg_file, {})
+    assert config.select_profiles(cfg, "nope") is None
+    assert config.select_profiles(cfg, "daily").name == "root"
+    assert set(config.select_profiles(cfg, None).profiles) == {"daily"}
+
+
+def test_validate_remote_config_unknown_type(tmp_path):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": "/mnt/data",
+            "dest": "/mnt/data/.snapshots",
+            "profiles": {
+                "daily": {
+                    "freq": {"full": "7d", "incr": "1d"},
+                    "keep": "30d",
+                    "remotes": [{"type": "s3", "bucket": "backups"}],
+                }
+            },
+        },
+    )
+    cfg = config.load_config(cfg_file, {})
+    errors = config.validate_remote_config(cfg)
+    assert any("unknown remote type" in error for error in errors)
+    assert config.validate_remote_config(cfg, "daily") == errors
+    assert config.validate_remote_config(cfg, "nope") == ["unknown profile: 'nope'"]
+
+
 def test_discover_configs_missing_dir_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "does-not-exist")
     with pytest.raises(config.ConfigError):
@@ -293,7 +332,7 @@ def test_remote_identity_ignores_auth():
     assert config.remote_identity(a) == config.remote_identity(b)
 
 
-def test_validate_warns_on_missing_age_recipient_path(tmp_path):
+def test_validate_errors_on_missing_age_recipient_path(tmp_path):
     cfg_file = tmp_path / "root.yaml"
     _write(
         cfg_file,
@@ -309,5 +348,5 @@ def test_validate_warns_on_missing_age_recipient_path(tmp_path):
     )
     cfg = config.load_config(cfg_file, {})
     (tmp_path / "src").mkdir()
-    _errors, warnings = config.validate(cfg, check_remotes=False)
-    assert any("age recipient is neither an existing file" in warning for warning in warnings)
+    errors, _warnings = config.validate(cfg, check_remotes=False)
+    assert any("age recipient is neither an existing file" in error for error in errors)

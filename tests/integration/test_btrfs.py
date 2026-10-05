@@ -12,8 +12,12 @@ from pathlib import Path
 
 import pytest
 
+import cli
+import manifest
+import restore
 import send
 import snapshot
+from config import Config, Profile, RemoteSpec
 
 pytestmark = pytest.mark.skipif(os.geteuid() != 0, reason="requires root")
 
@@ -175,3 +179,98 @@ def test_delete_snapshot(btrfs_fs):
 
     snapshot.delete_snapshot(snap)
     assert not snap.exists()
+
+
+def test_full_pipeline_backup_restore_and_prune(btrfs_fs, monkeypatch):
+    mnt = btrfs_fs
+    src, snapshots, target = _setup(mnt, "pipeline")
+    remote_root = mnt / "pipeline" / "remote"
+    tmpdir = mnt / "pipeline" / "tmp"
+    remote_root.mkdir()
+    tmpdir.mkdir()
+
+    cfg_path = mnt / "pipeline" / "root.yaml"
+    cfg_path.write_text(
+        f"src: {src}\n"
+        f"dest: {snapshots}\n"
+        f"tmpdir: {tmpdir}\n"
+        "profiles:\n"
+        "  daily:\n"
+        "    freq:\n"
+        "      full: 7d\n"
+        "      incr: 1d\n"
+        "    keep: 100s\n"
+        "    remotes:\n"
+        "      - name: offsite\n"
+        "        type: dir\n"
+        f"        path: {remote_root}\n"
+    )
+
+    cfg = Config(
+        name="pipeline",
+        path=cfg_path,
+        src=src,
+        dest=snapshots,
+        tmpdir=tmpdir,
+        compression=None,
+        encryption=None,
+        profiles={
+            "daily": Profile(
+                name="daily",
+                freq_full=7 * 86400,
+                freq_incr=86400,
+                keep=100,
+                remotes=[
+                    RemoteSpec(
+                        "offsite",
+                        "dir",
+                        {"type": "dir", "path": str(remote_root)},
+                    )
+                ],
+            )
+        },
+    )
+
+    (src / "a.txt").write_text("a\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 0)
+    assert cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False) == 0
+
+    meta = manifest.load(snapshots / "meta.yaml")
+    snaps = manifest.snapshots(meta, "daily")
+    assert len(snaps) == 1
+    full_id = snaps[0]["id"]
+    assert snaps[0]["type"] == "full"
+    assert (remote_root / "daily" / f"{full_id}.send").exists()
+
+    (src / "b.txt").write_text("b\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 90)
+    assert cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False) == 0
+
+    meta = manifest.load(snapshots / "meta.yaml")
+    snaps = manifest.snapshots(meta, "daily")
+    assert len(snaps) == 2
+    incr = snaps[1]
+    assert incr["type"] == "incr"
+    assert incr["parent"] == full_id
+    incr_id = incr["id"]
+
+    restore.run_restore(cfg, "daily", incr_id, target)
+    assert (target / incr_id / "a.txt").read_text() == "a\n"
+    assert (target / incr_id / "b.txt").read_text() == "b\n"
+
+    # A young child must protect its old full parent from pruning.
+    meta = manifest.load(snapshots / "meta.yaml")
+    by_profile = cli.collect_remotes(cfg)
+    monkeypatch.setattr(cli.util, "now", lambda: 150)
+    cli.prune(cfg, meta, by_profile)
+    remaining = [snap["id"] for snap in manifest.snapshots(meta, "daily")]
+    assert full_id in remaining and incr_id in remaining
+
+    # Once both are past retention, pruning cascades leaf-first.
+    monkeypatch.setattr(cli.util, "now", lambda: 1000)
+    cli.prune(cfg, meta, by_profile)
+    assert manifest.snapshots(meta, "daily") == []
+    assert not (snapshots / "daily" / full_id).exists()
+    assert not (snapshots / "daily" / incr_id).exists()
+    assert not (remote_root / "daily" / f"{full_id}.send").exists()
+    assert not (remote_root / "daily" / f"{incr_id}.send").exists()

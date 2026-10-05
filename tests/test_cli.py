@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -337,6 +338,90 @@ def test_reconcile_uploads_marks_committed_when_all_remotes_removed():
     assert snap["uploads"] == []
     assert snap["committed"] is True
     assert manifest.committed(snap)
+
+
+def test_reconcile_uploads_empty_uploads_no_remotes_marks_committed():
+    snap = {"type": "full", "uploads": []}
+    cli.reconcile_uploads(snap, set())
+    assert snap["committed"] is True
+    assert manifest.committed(snap)
+
+
+def test_reconcile_uploads_empty_uploads_with_remotes_not_committed():
+    snap = {"type": "full", "uploads": []}
+    cli.reconcile_uploads(snap, {"r"})
+    assert "committed" not in snap
+    assert not manifest.committed(snap)
+
+
+def test_prune_marks_local_deleted_when_remote_delete_fails(tmp_path, monkeypatch):
+    profile = _profile(
+        "daily", 7 * 86400, 86400, 1, [RemoteSpec("r", "dir", {"path": "/x"})]
+    )
+    cfg = _cfg({"daily": profile})
+    cfg.dest = tmp_path / "snapshots"
+    cfg.tmpdir = tmp_path / "tmp"
+    meta = {
+        "profiles": {
+            "daily": {
+                "snapshots": [
+                    {
+                        "id": "s1",
+                        "created": 1000,
+                        "type": "full",
+                        "parent": None,
+                        "file": "daily/s1.send",
+                        "uploads": [{"remote": "r", "status": "complete"}],
+                    }
+                ]
+            }
+        }
+    }
+
+    monkeypatch.setattr(cli.util, "now", lambda: 5000)
+    (cfg.dest / "daily" / "s1").mkdir(parents=True)
+    deleted = []
+    monkeypatch.setattr(cli.snapshot, "delete_snapshot", lambda path: deleted.append(path))
+
+    class FailRemote:
+        def delete(self, remote_path):
+            raise cli.util.BtrbakError("nope")
+
+    by_profile = {
+        "daily": [(RemoteSpec("r", "dir", {"path": "/x"}), FailRemote())]
+    }
+
+    cli.prune(cfg, meta, by_profile)
+
+    assert len(deleted) == 1
+    assert meta["profiles"]["daily"]["snapshots"][0]["local_deleted"] is True
+    assert manifest.last_committed(meta, "daily") is None
+
+
+def test_cmd_list_skips_configs_without_profile(monkeypatch, capsys):
+    cfg_a = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg_b = _cfg({"weekly": _profile("weekly", 86400, -1, 30 * 86400)})
+    monkeypatch.setattr(
+        cli.config_mod, "discover_configs", lambda subvol=None: [cfg_a, cfg_b]
+    )
+    monkeypatch.setattr(
+        cli.manifest,
+        "load",
+        lambda path: {"version": 1, "profiles": {"daily": {"snapshots": []}}},
+    )
+
+    assert cli.cmd_list(SimpleNamespace(subvol=None, profile="daily")) == 0
+    assert "root/daily" in capsys.readouterr().out
+
+
+def test_cmd_list_unknown_profile_raises(monkeypatch):
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    monkeypatch.setattr(
+        cli.config_mod, "discover_configs", lambda subvol=None: [cfg]
+    )
+
+    with pytest.raises(cli.config_mod.ConfigError):
+        cli.cmd_list(SimpleNamespace(subvol=None, profile="nope"))
 
 
 def test_clean_tmpdir_removes_empty_dirs(tmp_path, monkeypatch):

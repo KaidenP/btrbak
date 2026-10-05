@@ -41,6 +41,47 @@ def test_committed_flag_overrides_empty_uploads():
     assert manifest.committed({"type": "full", "committed": True, "uploads": []})
 
 
+def test_last_committed_skips_local_deleted():
+    meta = manifest.default()
+    manifest.add_snapshot(
+        meta,
+        "p",
+        {
+            "id": "a",
+            "type": "full",
+            "uploads": [{"remote": "r", "status": "complete"}],
+            "local_deleted": True,
+        },
+    )
+    assert manifest.last_committed(meta, "p") is None
+    assert manifest.last_full_committed(meta, "p") is None
+
+
+def test_last_committed_prefers_live_over_local_deleted():
+    meta = manifest.default()
+    manifest.add_snapshot(
+        meta,
+        "p",
+        {
+            "id": "a",
+            "type": "full",
+            "uploads": [{"remote": "r", "status": "complete"}],
+            "local_deleted": True,
+        },
+    )
+    manifest.add_snapshot(
+        meta,
+        "p",
+        {
+            "id": "b",
+            "type": "full",
+            "uploads": [{"remote": "r", "status": "complete"}],
+        },
+    )
+    assert manifest.last_committed(meta, "p")["id"] == "b"
+    assert manifest.last_full_committed(meta, "p")["id"] == "b"
+
+
 def test_children():
     meta = manifest.default()
     manifest.add_snapshot(meta, "p", {"id": "a", "type": "full"})
