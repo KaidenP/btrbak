@@ -66,9 +66,7 @@ def exclusive_lock(path):
 
     Raises :class:`BtrbakError` when another process already holds the lock.
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fd = _open_lock(path)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -77,6 +75,32 @@ def exclusive_lock(path):
         yield
     finally:
         os.close(fd)
+
+
+@contextlib.contextmanager
+def optional_lock(path):
+    """Yield True when the lock was acquired, False when it was already held.
+
+    Used where contention is expected and benign: the current holder should
+    keep working rather than have the newcomer fail outright.
+    """
+    fd = _open_lock(path)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)
+
+
+def _open_lock(path) -> int:
+    """Open (creating if needed) *path* for flock and return the descriptor."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
 
 
 def atomic_write_text(path, text: str) -> None:
@@ -213,3 +237,33 @@ def age_recipient_kind(recipient) -> str:
     if recipient.startswith("age1"):
         return "key"
     return "unknown"
+
+
+def age_recipient_error(recipient) -> str | None:
+    """Return why *recipient* is unusable, or ``None`` when it is valid.
+
+    A string with the right ``age1`` prefix is not necessarily a real key: a
+    typo, a truncated key or an upper-cased one only fails deep inside ``age``
+    when a backup is actually sent. Validating here instead means ``config
+    check`` catches it up front rather than after the snapshot subvolume has
+    already been created.
+
+    The key is validated by asking ``age`` to encrypt a throwaway payload --
+    the exact code path :mod:`send` uses. Age public keys are not secret, so
+    echoing one into an error message is safe.
+    """
+    kind = age_recipient_kind(recipient)
+    if kind == "unknown":
+        return "neither an existing file nor an inline age1 key"
+    cmd = ["age", "-R" if kind == "file" else "-r", str(recipient), "-o", os.devnull]
+    try:
+        proc = subprocess.run(
+            cmd, input=b"", stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        )
+    except FileNotFoundError:
+        return "the 'age' binary was not found"
+    if proc.returncode == 0:
+        return None
+    stderr = proc.stderr.decode("utf-8", "replace").strip()
+    first = stderr.splitlines()[0] if stderr else f"exit status {proc.returncode}"
+    return first.removeprefix("age: error: ")
