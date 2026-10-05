@@ -28,7 +28,7 @@ def main(argv=None) -> int:
     global VERBOSITY
     parser = build_parser()
     args = parser.parse_args(argv)
-    VERBOSITY = args.verbose
+    VERBOSITY = args.verbose + getattr(args, "verbose_extra", 0)
     if os.geteuid() != 0:
         print("btrbak: must be run as root", file=sys.stderr)
         return 1
@@ -47,18 +47,44 @@ def main(argv=None) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="btrbak", description="btrfs snapshot and offsite backup utility"
+    # `-v` is accepted both before and after the subcommand. The subparser
+    # copy suppresses its default so that a value given before the subcommand
+    # is not clobbered; the two counts are summed in main().
+    global_verbosity = argparse.ArgumentParser(add_help=False)
+    global_verbosity.add_argument(
+        "-v", "--verbose", action="count", default=0, help="increase verbosity"
     )
-    parser.add_argument("-v", "--verbose", action="count", default=0)
+    sub_verbosity = argparse.ArgumentParser(add_help=False)
+    sub_verbosity.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=argparse.SUPPRESS,
+        dest="verbose_extra",
+        help="increase verbosity",
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="btrbak",
+        description="btrfs snapshot and offsite backup utility",
+        parents=[global_verbosity],
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_config = sub.add_parser("config", help="configuration commands")
+    p_config = sub.add_parser(
+        "config", help="configuration commands", parents=[sub_verbosity]
+    )
     config_sub = p_config.add_subparsers(dest="config_command", required=True)
-    p_check = config_sub.add_parser("check", help="validate configuration")
+    p_check = config_sub.add_parser(
+        "check", help="validate configuration", parents=[sub_verbosity]
+    )
     p_check.set_defaults(func=cmd_config_check)
 
-    p_run = sub.add_parser("run", help="create due snapshots/backups and prune")
+    p_run = sub.add_parser(
+        "run",
+        help="create due snapshots/backups and prune",
+        parents=[sub_verbosity],
+    )
     p_run.add_argument("subvol", nargs="?")
     p_run.add_argument("profile", nargs="?")
     p_run.add_argument("--force", action="store_true")
@@ -67,17 +93,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("-n", "--dry-run", action="store_true")
     p_run.set_defaults(func=cmd_run)
 
-    p_verify = sub.add_parser("verify", help="check remote files against the manifest")
+    p_verify = sub.add_parser(
+        "verify",
+        help="check remote files against the manifest",
+        parents=[sub_verbosity],
+    )
     p_verify.add_argument("subvol", nargs="?")
     p_verify.add_argument("profile", nargs="?")
     p_verify.set_defaults(func=cmd_verify)
 
-    p_list = sub.add_parser("list", help="list snapshots and backups")
+    p_list = sub.add_parser(
+        "list", help="list snapshots and backups", parents=[sub_verbosity]
+    )
     p_list.add_argument("subvol", nargs="?")
     p_list.add_argument("profile", nargs="?")
     p_list.set_defaults(func=cmd_list)
 
-    p_restore = sub.add_parser("restore", help="restore a snapshot chain to a target")
+    p_restore = sub.add_parser(
+        "restore", help="restore a snapshot chain to a target", parents=[sub_verbosity]
+    )
     p_restore.add_argument("subvol")
     p_restore.add_argument("profile")
     p_restore.add_argument("snapshot_id")
@@ -157,9 +191,7 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
         meta = manifest.load(selected.dest / "meta.yaml")
         now_ts = util.now()
         for pname, profile in selected.profiles.items():
-            due, stype, parent = compute_plan(
-                selected, profile, meta, now_ts, force, full
-            )
+            due, stype, parent = compute_plan(profile, meta, now_ts, force, full)
             if due:
                 print(
                     f"[dry-run] {selected.name}/{pname}: would create {stype} snapshot"
@@ -205,7 +237,7 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
     return failures
 
 
-def compute_plan(cfg, profile, meta, now_ts, force=False, full=False):
+def compute_plan(profile, meta, now_ts, force=False, full=False):
     """Return ``(due, type, parent_id)`` for the next backup."""
     pname = profile.name
     last = manifest.last_committed(meta, pname)
@@ -265,7 +297,7 @@ def run_profile(cfg, profile, meta, remotes, force, full) -> int:
             failures += retry_upload(cfg, profile, snap, remotes)
 
     now_ts = util.now()
-    due, stype, parent_id = compute_plan(cfg, profile, meta, now_ts, force, full)
+    due, stype, parent_id = compute_plan(profile, meta, now_ts, force, full)
     if not due:
         return failures
 

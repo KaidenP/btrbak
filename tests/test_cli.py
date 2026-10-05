@@ -48,75 +48,67 @@ def _local(sid, created):
 
 def test_first_run_creates_full():
     profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
-    cfg = _cfg({"daily": profile})
-    due, stype, parent = cli.compute_plan(cfg, profile, {"profiles": {"daily": {"snapshots": []}}}, 5000)
+    due, stype, parent = cli.compute_plan(profile, {"profiles": {"daily": {"snapshots": []}}}, 5000)
     assert (due, stype, parent) == (True, "full", None)
 
 
 def test_first_run_creates_full_when_full_never_but_incr_auto():
     profile = _profile("daily", -1, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
-    cfg = _cfg({"daily": profile})
-    due, stype, parent = cli.compute_plan(cfg, profile, {"profiles": {"daily": {"snapshots": []}}}, 5000)
+    due, stype, parent = cli.compute_plan(profile, {"profiles": {"daily": {"snapshots": []}}}, 5000)
     assert (due, stype, parent) == (True, "full", None)
 
 
 def test_manual_remote_profile_not_due_on_first_run():
     profile = _profile("manual", -1, -1, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
-    cfg = _cfg({"manual": profile})
-    assert cli.compute_plan(cfg, profile, {"profiles": {"manual": {"snapshots": []}}}, 5000) == (False, None, None)
+    assert cli.compute_plan(profile, {"profiles": {"manual": {"snapshots": []}}}, 5000) == (False, None, None)
 
 
 def test_full_due_after_window():
     profile = _profile("daily", 100, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
-    cfg = _cfg({"daily": profile})
     meta = {"profiles": {"daily": {"snapshots": [_remote("f", 1000)]}}}
-    due, stype, parent = cli.compute_plan(cfg, profile, meta, 5000)
+    due, stype, parent = cli.compute_plan(profile, meta, 5000)
     assert (due, stype, parent) == (True, "full", None)
 
 
 def test_incremental_due():
     profile = _profile("daily", 7 * 86400, 100, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
-    cfg = _cfg({"daily": profile})
     meta = {"profiles": {"daily": {"snapshots": [_remote("f", 4000)]}}}
-    due, stype, parent = cli.compute_plan(cfg, profile, meta, 5000)
+    due, stype, parent = cli.compute_plan(profile, meta, 5000)
     assert (due, stype, parent) == (True, "incr", "f")
 
 
 def test_nothing_due():
     profile = _profile("daily", 7 * 86400, 100, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
-    cfg = _cfg({"daily": profile})
     meta = {"profiles": {"daily": {"snapshots": [_remote("f", 4990)]}}}
-    due, stype, parent = cli.compute_plan(cfg, profile, meta, 5000)
+    due, stype, parent = cli.compute_plan(profile, meta, 5000)
     assert (due, stype, parent) == (False, None, None)
 
 
 def test_force_creates_incremental_when_not_due():
     profile = _profile("daily", 7 * 86400, 100, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
-    cfg = _cfg({"daily": profile})
     meta = {"profiles": {"daily": {"snapshots": [_remote("f", 4990)]}}}
-    due, stype, parent = cli.compute_plan(cfg, profile, meta, 5000, force=True)
+    due, stype, parent = cli.compute_plan(profile, meta, 5000, force=True)
     assert (due, stype, parent) == (True, "incr", "f")
 
 
 def test_full_flag_forces_full():
     profile = _profile("daily", 7 * 86400, 100, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
-    cfg = _cfg({"daily": profile})
     meta = {"profiles": {"daily": {"snapshots": [_remote("f", 4990)]}}}
-    due, stype, parent = cli.compute_plan(cfg, profile, meta, 5000, full=True)
+    due, stype, parent = cli.compute_plan(profile, meta, 5000, full=True)
     assert (due, stype, parent) == (True, "full", None)
 
 
 def test_local_only_due_and_type():
     profile = _profile("local", 86400, -1, 14 * 86400)
-    cfg = _cfg({"local": profile})
-    assert cli.compute_plan(cfg, profile, {"profiles": {"local": {"snapshots": []}}}, 5000) == (
+    assert cli.compute_plan(
+        profile, {"profiles": {"local": {"snapshots": []}}}, 5000) == (
         True,
         "local",
         None,
     )
 
     meta = {"profiles": {"local": {"snapshots": [_local("a", 4000)]}}}
-    assert cli.compute_plan(cfg, profile, meta, 5000) == (False, None, None)
+    assert cli.compute_plan(profile, meta, 5000) == (False, None, None)
 
 
 def test_unique_snapshot_id(tmp_path):
@@ -203,9 +195,8 @@ def test_reconcile_uploads_noop_when_current():
 
 def test_local_only_manual_profile_not_due_on_first_run():
     profile = _profile("manual", -1, -1, 30 * 86400)
-    cfg = _cfg({"manual": profile})
     assert cli.compute_plan(
-        cfg, profile, {"profiles": {"manual": {"snapshots": []}}}, 5000
+        profile, {"profiles": {"manual": {"snapshots": []}}}, 5000
     ) == (False, None, None)
 
 
@@ -320,10 +311,9 @@ def test_retry_upload_resends_when_no_complete_copy(tmp_path, monkeypatch):
 
 def test_full_flag_ignored_for_local_only():
     profile = _profile("local", 86400, -1, 14 * 86400)
-    cfg = _cfg({"local": profile})
     meta = {"profiles": {"local": {"snapshots": [_local("a", 4990)]}}}
-    assert cli.compute_plan(cfg, profile, meta, 5000, full=True) == (False, None, None)
-    assert cli.compute_plan(cfg, profile, meta, 5000, force=True) == (True, "local", None)
+    assert cli.compute_plan(profile, meta, 5000, full=True) == (False, None, None)
+    assert cli.compute_plan(profile, meta, 5000, force=True) == (True, "local", None)
 
 
 def test_reconcile_uploads_marks_committed_when_all_remotes_removed():
@@ -719,3 +709,23 @@ def test_run_config_dry_run_does_not_sleep(tmp_path, monkeypatch, capsys):
     cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=True)
     assert slept == []
     assert "Ctrl-C" not in capsys.readouterr().err
+
+
+# --- verbosity --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv,expected",
+    [
+        (["list"], 0),
+        (["-v", "list"], 1),
+        (["list", "-v"], 1),
+        (["-v", "list", "-v"], 2),
+        (["-vv", "list"], 2),
+    ],
+)
+def test_verbosity_accepted_before_and_after_subcommand(monkeypatch, argv, expected):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cli, "cmd_list", lambda args: 0)
+    assert cli.main(argv) == 0
+    assert cli.VERBOSITY == expected
