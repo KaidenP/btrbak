@@ -181,3 +181,120 @@ def test_reconcile_uploads_noop_when_current():
     snap = {"uploads": list(uploads)}
     cli.reconcile_uploads(snap, {"r"})
     assert snap["uploads"] == uploads
+
+
+def test_local_only_manual_profile_not_due_on_first_run():
+    profile = _profile("manual", -1, -1, 30 * 86400)
+    cfg = _cfg({"manual": profile})
+    assert cli.compute_plan(
+        cfg, profile, {"profiles": {"manual": {"snapshots": []}}}, 5000
+    ) == (False, None, None)
+
+
+def test_collect_remotes_distinguishes_same_name_different_settings():
+    cfg = _cfg(
+        {
+            "a": _profile("a", 86400, -1, 30 * 86400, [RemoteSpec("offsite", "dir", {"path": "/remoteA"})]),
+            "b": _profile("b", 86400, -1, 30 * 86400, [RemoteSpec("offsite", "dir", {"path": "/remoteB"})]),
+        }
+    )
+    by_profile = cli.collect_remotes(cfg)
+    assert by_profile["a"][0][1].settings["path"] == "/remoteA"
+    assert by_profile["b"][0][1].settings["path"] == "/remoteB"
+
+
+def test_unique_remotes_deduplicates_identical_endpoints():
+    cfg = _cfg(
+        {
+            "a": _profile("a", 86400, -1, 30 * 86400, [RemoteSpec("offsite", "dir", {"path": "/remote"})]),
+            "b": _profile("b", 86400, -1, 30 * 86400, [RemoteSpec("offsite", "dir", {"path": "/remote"})]),
+        }
+    )
+    unique = cli.unique_remotes(cli.collect_remotes(cfg))
+    assert len(unique) == 1
+
+
+class _FakeRemote:
+    def __init__(self, data=b"data"):
+        self.data = data
+        self.writes = []
+
+    def read(self, remote_path, local_dest):
+        local_dest.write_bytes(self.data)
+
+    def write(self, local_src, remote_path):
+        self.writes.append(remote_path)
+
+
+def test_retry_upload_reuses_complete_copy(tmp_path, monkeypatch):
+    cfg = _cfg({"p": _profile("p", 86400, -1, 30 * 86400)})
+    cfg.dest = tmp_path / "snapshots"
+    cfg.tmpdir = tmp_path / "tmp"
+
+    snap = {
+        "id": "s1",
+        "type": "full",
+        "parent": None,
+        "file": "p/s1.send",
+        "sha256": "deadbeef",
+        "size": 4,
+        "uploads": [
+            {"remote": "a", "status": "complete"},
+            {"remote": "b", "status": "failed"},
+        ],
+    }
+    profile = cfg.profiles["p"]
+    spec_a = RemoteSpec("a", "dir", {"path": "/a"})
+    spec_b = RemoteSpec("b", "dir", {"path": "/b"})
+    remote_a = _FakeRemote(b"data")
+    remote_b = _FakeRemote(b"data")
+
+    monkeypatch.setattr(cli.util, "sha256_file", lambda path: "deadbeef")
+
+    failed = cli.retry_upload(cfg, profile, snap, [(spec_a, remote_a), (spec_b, remote_b)])
+
+    assert failed == 0
+    assert remote_b.writes == ["p/s1.send"]
+    assert remote_a.writes == []
+    assert snap["sha256"] == "deadbeef"
+    assert snap["uploads"][1]["status"] == "complete"
+
+
+def test_retry_upload_resends_when_no_complete_copy(tmp_path, monkeypatch):
+    cfg = _cfg({"p": _profile("p", 86400, -1, 30 * 86400)})
+    cfg.dest = tmp_path / "snapshots"
+    cfg.tmpdir = tmp_path / "tmp"
+    (cfg.dest / "p" / "s1").mkdir(parents=True)
+
+    snap = {
+        "id": "s1",
+        "type": "full",
+        "parent": None,
+        "file": "p/s1.send",
+        "sha256": None,
+        "size": None,
+        "uploads": [
+            {"remote": "a", "status": "failed"},
+            {"remote": "b", "status": "failed"},
+        ],
+    }
+    profile = cfg.profiles["p"]
+    spec_a = RemoteSpec("a", "dir", {"path": "/a"})
+    spec_b = RemoteSpec("b", "dir", {"path": "/b"})
+    remote_a = _FakeRemote()
+    remote_b = _FakeRemote()
+
+    def fake_send(snapshot, parent, out_path, compression=None, encryption=None):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b"newdata")
+
+    monkeypatch.setattr(cli.send, "send_snapshot", fake_send)
+    monkeypatch.setattr(cli.util, "sha256_file", lambda path: "newhash")
+
+    failed = cli.retry_upload(cfg, profile, snap, [(spec_a, remote_a), (spec_b, remote_b)])
+
+    assert failed == 0
+    assert remote_a.writes == ["p/s1.send"]
+    assert remote_b.writes == ["p/s1.send"]
+    assert snap["sha256"] == "newhash"
+    assert snap["size"] == len(b"newdata")
