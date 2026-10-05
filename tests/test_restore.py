@@ -72,6 +72,21 @@ def test_build_chain_detects_cycle():
         restore.build_chain(meta, "p", "a")
 
 
+def test_build_chain_rejects_incremental_root():
+    meta = {
+        "profiles": {
+            "p": {
+                "snapshots": [
+                    {"id": "a", "parent": None, "type": "incr"},
+                    {"id": "b", "parent": "a", "type": "incr"},
+                ]
+            }
+        }
+    }
+    with pytest.raises(restore.BtrbakError):
+        restore.build_chain(meta, "p", "b")
+
+
 def test_restore_target_is_file_raises(tmp_path):
     target = tmp_path / "target"
     target.write_text("x")

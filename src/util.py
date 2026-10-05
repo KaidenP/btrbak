@@ -132,6 +132,11 @@ def btrfs_fsid(path) -> str | None:
     return match.group(1).lower() if match else None
 
 
+def _unescape_mounts(value: str) -> str:
+    """Decode octal escapes (``\\040`` etc.) used in ``/proc/self/mounts``."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), value)
+
+
 def _mount_point(path: Path) -> Path:
     """Return the real mount point containing *path*.
 
@@ -147,7 +152,7 @@ def _mount_point(path: Path) -> Path:
                 parts = line.split()
                 if len(parts) < 2:
                     continue
-                mount = Path(parts[1].replace("\\040", " "))
+                mount = Path(_unescape_mounts(parts[1]))
                 if path == mount or mount in path.parents:
                     if best is None or len(mount.parts) > len(best.parts):
                         best = mount

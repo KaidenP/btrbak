@@ -121,9 +121,13 @@ def discover_configs(subvol=None) -> list[Config]:
 
     if not CONFIG_DIR.is_dir():
         raise ConfigError(f"config directory not found: {CONFIG_DIR}")
-    paths = sorted(
-        list(CONFIG_DIR.glob("*.yaml")) + list(CONFIG_DIR.glob("*.yml"))
-    )
+    # Prefer <name>.yaml over <name>.yml when both exist for the same subvol.
+    by_stem = {}
+    for path in CONFIG_DIR.glob("*.yaml"):
+        by_stem[path.stem] = path
+    for path in CONFIG_DIR.glob("*.yml"):
+        by_stem.setdefault(path.stem, path)
+    paths = sorted(by_stem.values(), key=lambda p: p.name)
     if not paths:
         raise ConfigError(f"no config files found in {CONFIG_DIR}")
     return [load_config(path, auth) for path in paths]

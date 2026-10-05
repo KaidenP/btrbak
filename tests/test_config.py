@@ -252,6 +252,45 @@ def test_config_path_for_subvol_missing(tmp_path, monkeypatch):
         config.config_path_for_subvol("nope")
 
 
+def test_discover_configs_prefers_yaml_over_yml(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    _write(
+        tmp_path / "root.yaml",
+        {
+            "src": "/a",
+            "dest": "/b",
+            "profiles": {
+                "daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}
+            },
+        },
+    )
+    _write(
+        tmp_path / "root.yml",
+        {
+            "src": "/c",
+            "dest": "/d",
+            "profiles": {
+                "daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}
+            },
+        },
+    )
+    _write(
+        tmp_path / "other.yml",
+        {
+            "src": "/e",
+            "dest": "/f",
+            "profiles": {
+                "daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}
+            },
+        },
+    )
+
+    cfgs = config.discover_configs()
+
+    assert [c.name for c in cfgs] == ["other", "root"]
+    assert str(cfgs[1].src) == "/a"
+
+
 def test_filter_profiles_unknown_raises(tmp_path):
     cfg_file = tmp_path / "root.yaml"
     _write(

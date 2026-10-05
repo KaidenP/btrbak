@@ -52,10 +52,14 @@ class DirRemote(Remote):
             prefix=destination.name + ".",
             suffix=".tmp",
         )
-        os.close(fd)
         try:
-            shutil.copyfile(local_src, tmp_name)
+            with os.fdopen(fd, "wb") as tmp_handle:
+                with open(local_src, "rb") as src_handle:
+                    shutil.copyfileobj(src_handle, tmp_handle)
+                tmp_handle.flush()
+                os.fsync(tmp_handle.fileno())
             os.replace(tmp_name, destination)
+            _fsync_dir(destination.parent)
         finally:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
@@ -65,3 +69,17 @@ class DirRemote(Remote):
             self._resolve(remote_path).unlink()
         except FileNotFoundError:
             pass
+
+
+def _fsync_dir(path: Path) -> None:
+    """Best-effort fsync of a directory after a rename."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)

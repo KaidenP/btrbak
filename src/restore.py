@@ -23,6 +23,11 @@ def build_chain(meta: dict, profile_name: str, snapshot_id: str) -> list[str]:
             raise BtrbakError(f"missing snapshot in chain: {current}")
         current = snap.get("parent")
     chain.reverse()
+    root = manifest.get_snapshot(meta, profile_name, chain[0])
+    if root is not None and root.get("type") == "incr":
+        raise BtrbakError(
+            f"chain root {chain[0]} is incremental; expected a full backup"
+        )
     return chain
 
 
