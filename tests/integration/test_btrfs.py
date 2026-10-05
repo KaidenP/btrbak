@@ -8,7 +8,6 @@ as root and btrfs tooling is available.
 import os
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -181,15 +180,9 @@ def test_delete_snapshot(btrfs_fs):
     assert not snap.exists()
 
 
-def test_full_pipeline_backup_restore_and_prune(btrfs_fs, monkeypatch):
-    mnt = btrfs_fs
-    src, snapshots, target = _setup(mnt, "pipeline")
-    remote_root = mnt / "pipeline" / "remote"
-    tmpdir = mnt / "pipeline" / "tmp"
-    remote_root.mkdir()
-    tmpdir.mkdir()
-
-    cfg_path = mnt / "pipeline" / "root.yaml"
+def _pipeline_cfg(mnt, name, src, snapshots, remote_root, tmpdir):
+    """Write a single-profile config and return the matching Config object."""
+    cfg_path = mnt / name / "root.yaml"
     cfg_path.write_text(
         f"src: {src}\n"
         f"dest: {snapshots}\n"
@@ -205,9 +198,8 @@ def test_full_pipeline_backup_restore_and_prune(btrfs_fs, monkeypatch):
         "        type: dir\n"
         f"        path: {remote_root}\n"
     )
-
-    cfg = Config(
-        name="pipeline",
+    return Config(
+        name=name,
         path=cfg_path,
         src=src,
         dest=snapshots,
@@ -230,6 +222,17 @@ def test_full_pipeline_backup_restore_and_prune(btrfs_fs, monkeypatch):
             )
         },
     )
+
+
+def test_full_pipeline_backup_restore_and_prune(btrfs_fs, monkeypatch):
+    mnt = btrfs_fs
+    src, snapshots, target = _setup(mnt, "pipeline")
+    remote_root = mnt / "pipeline" / "remote"
+    tmpdir = mnt / "pipeline" / "tmp"
+    remote_root.mkdir()
+    tmpdir.mkdir()
+
+    cfg = _pipeline_cfg(mnt, "pipeline", src, snapshots, remote_root, tmpdir)
 
     (src / "a.txt").write_text("a\n")
     monkeypatch.setattr(cli.util, "now", lambda: 0)
@@ -274,3 +277,70 @@ def test_full_pipeline_backup_restore_and_prune(btrfs_fs, monkeypatch):
     assert not (snapshots / "daily" / incr_id).exists()
     assert not (remote_root / "daily" / f"{full_id}.send").exists()
     assert not (remote_root / "daily" / f"{incr_id}.send").exists()
+
+
+def test_restore_resumes_after_partial_failure(btrfs_fs, monkeypatch):
+    """An interrupted restore resumes instead of failing with 'File exists'."""
+    mnt = btrfs_fs
+    src, snapshots, target = _setup(mnt, "resume")
+    remote_root = mnt / "resume" / "remote"
+    tmpdir = mnt / "resume" / "tmp"
+    remote_root.mkdir()
+    tmpdir.mkdir()
+    cfg = _pipeline_cfg(mnt, "resume", src, snapshots, remote_root, tmpdir)
+
+    (src / "a.txt").write_text("a\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 0)
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
+    full_id = manifest.snapshots(manifest.load(snapshots / "meta.yaml"), "daily")[0]["id"]
+
+    (src / "b.txt").write_text("b\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 60)
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
+    incr_id = manifest.snapshots(manifest.load(snapshots / "meta.yaml"), "daily")[1]["id"]
+
+    # Interrupt the restore after the first link has been received.
+    calls = []
+    real_stream = send.restore_stream
+
+    def failing_stream(send_file, tgt, compression=None, encryption=None):
+        real_stream(send_file, tgt, compression, encryption)
+        calls.append(send_file)
+        if len(calls) == 1:
+            raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(send, "restore_stream", failing_stream)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        restore.run_restore(cfg, "daily", incr_id, target)
+
+    assert (target / full_id).exists()
+    assert not (target / incr_id).exists()
+
+    # Re-running skips the already-received link and completes the chain.
+    monkeypatch.setattr(send, "restore_stream", real_stream)
+    restore.run_restore(cfg, "daily", incr_id, target)
+
+    assert (target / incr_id / "a.txt").read_text() == "a\n"
+    assert (target / incr_id / "b.txt").read_text() == "b\n"
+
+
+def test_restore_rejects_foreign_entry_in_target(btrfs_fs, monkeypatch):
+    """A plain directory where a received subvolume belongs blocks the restore."""
+    mnt = btrfs_fs
+    src, snapshots, target = _setup(mnt, "foreign")
+    remote_root = mnt / "foreign" / "remote"
+    tmpdir = mnt / "foreign" / "tmp"
+    remote_root.mkdir()
+    tmpdir.mkdir()
+    cfg = _pipeline_cfg(mnt, "foreign", src, snapshots, remote_root, tmpdir)
+
+    (src / "a.txt").write_text("a\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 0)
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
+    snap_id = manifest.snapshots(manifest.load(snapshots / "meta.yaml"), "daily")[0]["id"]
+
+    target.mkdir()
+    (target / snap_id).mkdir()
+
+    with pytest.raises(restore.BtrbakError, match="not a btrfs subvolume"):
+        restore.run_restore(cfg, "daily", snap_id, target)
