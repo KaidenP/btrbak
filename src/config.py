@@ -119,13 +119,14 @@ def discover_configs(subvol=None) -> list[Config]:
     if subvol:
         return [load_config(config_path_for_subvol(subvol), auth)]
 
-    configs = []
-    if CONFIG_DIR.is_dir():
-        for path in sorted(
-            list(CONFIG_DIR.glob("*.yaml")) + list(CONFIG_DIR.glob("*.yml"))
-        ):
-            configs.append(load_config(path, auth))
-    return configs
+    if not CONFIG_DIR.is_dir():
+        raise ConfigError(f"config directory not found: {CONFIG_DIR}")
+    paths = sorted(
+        list(CONFIG_DIR.glob("*.yaml")) + list(CONFIG_DIR.glob("*.yml"))
+    )
+    if not paths:
+        raise ConfigError(f"no config files found in {CONFIG_DIR}")
+    return [load_config(path, auth) for path in paths]
 
 
 def config_path_for_subvol(subvol) -> Path:
@@ -141,14 +142,9 @@ def filter_profiles(config: Config, name: str | None) -> Config:
     """Return *config* restricted to profile *name* (unchanged when *name* is None)."""
     if not name:
         return config
-    return replace(
-        config,
-        profiles={
-            pname: profile
-            for pname, profile in config.profiles.items()
-            if pname == name
-        },
-    )
+    if name not in config.profiles:
+        raise ConfigError(f"unknown profile: {name!r}")
+    return replace(config, profiles={name: config.profiles[name]})
 
 
 def _parse_profile(name, praw, auth, path) -> Profile:
@@ -217,6 +213,17 @@ def _parse_remote(entry, auth, path, profile) -> RemoteSpec:
     return RemoteSpec(id=rid, type=str(rtype), settings=resolved)
 
 
+def remote_identity(spec) -> str:
+    """Return a stable identity for a remote endpoint.
+
+    Two remotes collapse to the same identity only when their full resolved
+    settings match. The ``name`` (a stable manifest id) is intentionally
+    included so distinct remotes never alias each other even when they share a
+    name.
+    """
+    return json.dumps(spec.settings, sort_keys=True, default=str)
+
+
 def _normalize_compression(compression, path) -> dict | None:
     if compression is None:
         return None
@@ -258,11 +265,15 @@ def validate(config: Config, check_remotes=True):
     errors: list[str] = []
     warnings: list[str] = []
 
+    btrfs_available = which("btrfs")
+    if not btrfs_available:
+        errors.append("the 'btrfs' binary was not found (install btrfs-progs)")
+
     if not config.src.exists():
         errors.append(f"src does not exist: {config.src}")
-    elif not is_subvolume(config.src):
+    elif btrfs_available and not is_subvolume(config.src):
         errors.append(f"src is not a btrfs subvolume: {config.src}")
-    else:
+    elif btrfs_available:
         if config.dest.exists():
             if not same_device(config.src, config.dest):
                 errors.append(

@@ -250,3 +250,38 @@ def test_config_path_for_subvol_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
     with pytest.raises(config.ConfigError):
         config.config_path_for_subvol("nope")
+
+
+def test_filter_profiles_unknown_raises(tmp_path):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": "/mnt/data",
+            "dest": "/mnt/data/.snapshots",
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        },
+    )
+    cfg = config.load_config(cfg_file, {})
+    with pytest.raises(config.ConfigError):
+        config.filter_profiles(cfg, "nope")
+
+
+def test_discover_configs_missing_dir_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "does-not-exist")
+    with pytest.raises(config.ConfigError):
+        config.discover_configs()
+
+
+def test_discover_configs_empty_dir_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    with pytest.raises(config.ConfigError):
+        config.discover_configs()
+
+
+def test_remote_identity_distinguishes_settings():
+    a = config.RemoteSpec("offsite", "dir", {"path": "/a"})
+    b = config.RemoteSpec("offsite", "dir", {"path": "/b"})
+    c = config.RemoteSpec("offsite", "dir", {"path": "/a"})
+    assert config.remote_identity(a) != config.remote_identity(b)
+    assert config.remote_identity(a) == config.remote_identity(c)

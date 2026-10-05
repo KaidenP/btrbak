@@ -21,13 +21,17 @@ def run(cmd, stdout=None, stdin=None, check=True) -> subprocess.CompletedProcess
 
     By default stdout/stderr are captured and a non-zero exit raises
     :class:`BtrbakError`. Pass ``stdout=file`` to stream stdout to a file.
+    A missing executable also raises :class:`BtrbakError`.
     """
-    proc = subprocess.run(
-        cmd,
-        stdout=stdout if stdout is not None else subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=stdin,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=stdout if stdout is not None else subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=stdin,
+        )
+    except FileNotFoundError as exc:
+        raise BtrbakError(f"required command not found: {cmd[0]}") from exc
     if check and proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", "replace") if proc.stderr else ""
         raise BtrbakError(
@@ -176,11 +180,14 @@ def is_btrfs(path) -> bool:
 
 def is_subvolume(path) -> bool:
     """Return True when *path* is a btrfs subvolume."""
-    proc = subprocess.run(
-        ["btrfs", "subvolume", "show", str(path)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        proc = subprocess.run(
+            ["btrfs", "subvolume", "show", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return False
     return proc.returncode == 0
 
 
