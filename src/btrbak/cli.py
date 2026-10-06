@@ -36,8 +36,10 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     VERBOSITY = args.verbose + getattr(args, "verbose_extra", 0)
     if os.geteuid() != 0:
+        # 2 is the "usage/validation" status; running as non-root is a usage
+        # error, not a runtime failure (exit-code contract).
         print("btrbak: must be run as root", file=sys.stderr)
-        return 1
+        return 2
 
     try:
         return args.func(args)
@@ -54,6 +56,9 @@ def main(argv=None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - last-resort one-line error surface
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -204,7 +209,7 @@ def cmd_gdrive_authorize(args) -> int:
 
     token_path = Path(args.token)
     try:
-        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     except OSError as exc:
         print(
             f"error: cannot create {token_path.parent}: {exc}", file=sys.stderr
@@ -304,16 +309,20 @@ def _discover_group(group_name):
         try:
             path = config_mod.config_path_for_subvol(subvol)
         except config_mod.ConfigError as exc:
-            results.append((subvol, None, exc))
+            results.append((subvol, None, exc, set()))
             continue
         if auth_error is not None:
-            results.append((path, None, auth_error))
+            results.append((path, None, auth_error, set()))
             continue
         try:
             cfg = config_mod.load_config(path, auth)
         except config_mod.ConfigError as exc:
-            results.append((path, None, exc))
+            results.append((path, None, exc, set()))
             continue
+        # Capture the unfiltered profile names before any SUBVOL:PROFILE
+        # member narrows the config, so callers can tell a profile merely
+        # not selected by the group apart from a genuinely orphaned one.
+        configured = set(cfg.profiles)
         if profile_names is not None:
             missing = sorted(name for name in profile_names if name not in cfg.profiles)
             if missing:
@@ -325,11 +334,12 @@ def _discover_group(group_name):
                             f"group {group_name!r}: unknown profile(s) in "
                             f"{cfg.name}: {', '.join(missing)}"
                         ),
+                        set(),
                     )
                 )
                 continue
             cfg = config_mod.select_profile_names(cfg, profile_names)
-        results.append((path, cfg, None))
+        results.append((path, cfg, None, configured))
     return results
 
 
@@ -351,9 +361,14 @@ def cmd_run(args) -> int:
             )
             return 0
     else:
-        discovered = _discover(args.subvol)
+        # Normalise to the same (path, cfg, error, unfiltered) shape
+        # _discover_group returns, so one loop handles both modes.
+        discovered = [
+            (path, cfg, err, set(cfg.profiles) if cfg is not None else set())
+            for path, cfg, err in _discover(args.subvol)
+        ]
 
-    for path, cfg, error in discovered:
+    for path, cfg, error, configured in discovered:
         if error is not None:
             print(f"config error: {error}", file=sys.stderr)
             config_errors += 1
@@ -366,9 +381,11 @@ def cmd_run(args) -> int:
                 continue
         # The unfiltered profile names travel with the selection so a run can
         # tell an orphaned manifest profile apart from one merely filtered out
-        # by PROFILE.
-        selected_configs.append((selected, set(cfg.profiles)))
-    if args.profile and not selected_configs:
+        # by PROFILE (or by a group's SUBVOL:PROFILE members).
+        selected_configs.append((selected, configured))
+    if args.profile and not selected_configs and config_errors == 0:
+        # Only call it "unknown" when every config actually loaded; otherwise
+        # the real failure was reported above and must not be masked.
         raise config_mod.ConfigError(f"unknown profile: {args.profile!r}")
 
     upload_failures = 0
@@ -498,6 +515,12 @@ def run_config(
         for pname, profile in selected.profiles.items():
             try:
                 failures += run_profile(selected, profile, meta, by_profile[pname], force, full)
+            except (util.BtrbakError, RemoteError, OSError) as exc:
+                # One profile failing must not abort the rest of the run or
+                # skip retention pruning; report it and keep going (mirrors
+                # the per-config tolerance in cmd_run).
+                print(f"error ({selected.name}/{pname}): {exc}", file=sys.stderr)
+                failures += 1
             finally:
                 manifest.save(meta_path, meta)
                 _push_manifest_best_effort(meta_path, by_profile)
@@ -1176,7 +1199,12 @@ def cmd_list(args) -> int:
             continue
         matched = True
         meta_path = cfg.dest / "meta.yaml"
-        meta = manifest.load(meta_path)
+        try:
+            meta = manifest.load(meta_path)
+        except util.BtrbakError as exc:
+            print(f"config error ({cfg.name}): {exc}", file=sys.stderr)
+            config_errors += 1
+            continue
         if not meta_path.exists():
             print(
                 f"warning: {cfg.name}: no local manifest at {meta_path}; "
@@ -1210,12 +1238,16 @@ def _load_meta_for_verify(cfg):
 
     Prefer the local ``dest/meta.yaml``; when it is missing, download a copy
     from the first configured remote that has one. Returns ``(None, False)``
-    when no manifest is available anywhere.
+    when no manifest is available anywhere. A present-but-unloadable manifest
+    (local or remote) is an error, not "no manifest": the local one raises
+    :class:`BtrbakError`, and remote copies that fail to load are collected
+    and reported rather than silently treated as absent.
     """
     local = cfg.dest / "meta.yaml"
     if local.exists():
         return manifest.load(local), False
 
+    load_errors = []
     with util.scratch_dir(
         cfg.tmpdir / cfg.name / util.VERIFY_SCRATCH, cfg.tmpdir
     ) as tmpdir:
@@ -1231,10 +1263,20 @@ def _load_meta_for_verify(cfg):
                 try:
                     remote.read("meta.yaml", tmp)
                     return manifest.load(tmp), True
-                except Exception:  # noqa: BLE001 - try the next remote
+                except RemoteNotFoundError:
+                    continue
+                except util.BtrbakError as exc:
+                    load_errors.append(f"{spec.id}: {exc}")
+                    continue
+                except Exception as exc:  # noqa: BLE001 - try the next remote
+                    load_errors.append(f"{spec.id}: {exc}")
                     continue
                 finally:
                     tmp.unlink(missing_ok=True)
+    if load_errors:
+        raise util.BtrbakError(
+            "no valid meta.yaml on any remote: " + "; ".join(load_errors)
+        )
     return None, False
 
 
@@ -1411,10 +1453,12 @@ def _verify_snapshot(cfg, meta, pname, snap, lookup, by_id, tmpdir) -> int:
         tmp.parent.mkdir(parents=True, exist_ok=True)
         try:
             remote.read(remote_file, tmp)
-            if util.sha256_file(tmp) != snap.get("sha256"):
+            sha = snap.get("sha256")
+            if sha is not None and util.sha256_file(tmp) != sha:
                 print(f"CORRUPT {where} on remote {spec.id}")
                 failures += 1
-            elif tmp.stat().st_size != snap.get("size"):
+            size = snap.get("size")
+            if size is not None and tmp.stat().st_size != size:
                 print(f"SIZE MISMATCH {where} on remote {spec.id}")
                 failures += 1
         except RemoteNotFoundError:

@@ -11,6 +11,14 @@ from btrbak import util
 from btrbak.config import Config, Profile, RemoteSpec
 
 
+@pytest.fixture(autouse=True)
+def _reset_verbosity():
+    """VERBOSITY is a module-global mutated by the verbosity tests; restore it."""
+    original = cli.VERBOSITY
+    yield
+    cli.VERBOSITY = original
+
+
 def _cfg(profiles):
     return Config(
         name="root",
@@ -1314,10 +1322,13 @@ def test_cmd_list_tolerates_upload_entries_without_fields(tmp_path, monkeypatch,
     assert "uploads=[?=?]" in capsys.readouterr().out
 
 
-def test_cmd_list_tolerates_non_numeric_created(tmp_path, monkeypatch, capsys):
+def test_cmd_list_reports_non_numeric_created(tmp_path, monkeypatch, capsys):
+    """A corrupt `created` field must surface as a clean config error, not crash."""
     _list_setup(tmp_path, monkeypatch, [{"id": "s1", "created": "nope"}])
-    assert cli.cmd_list(_verify_args()) == 0
-    assert "s1" in capsys.readouterr().out
+    assert cli.cmd_list(_verify_args()) == 2
+    captured = capsys.readouterr()
+    assert "'created' must be a int" in captured.err
+    assert "s1" not in captured.out
 
 
 # --- snapshot dependency depth ----------------------------------------------
@@ -1481,9 +1492,10 @@ def test_discover_group_bare_member_selects_all_profiles(monkeypatch):
 
     results = cli._discover_group("apt")
     assert len(results) == 1
-    _path, selected, error = results[0]
+    _path, selected, error, configured = results[0]
     assert error is None
     assert set(selected.profiles) == {"daily", "weekly"}
+    assert configured == {"daily", "weekly"}
 
 
 def test_list_reports_an_unloadable_config_and_still_lists_the_rest(tmp_path, monkeypatch, capsys):
@@ -1661,7 +1673,7 @@ def test_main_maps_oserror_to_exit_1(monkeypatch, capsys):
 
 def test_main_rejects_non_root(monkeypatch, capsys):
     monkeypatch.setattr(cli.os, "geteuid", lambda: 1000)
-    assert cli.main(["list"]) == 1
+    assert cli.main(["list"]) == 2
     assert "must be run as root" in capsys.readouterr().err
 
 
@@ -1684,7 +1696,7 @@ def test_main_reports_malformed_manifest_cleanly(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
 
-    assert cli.main(["list"]) == 1
+    assert cli.main(["list"]) == 2
     assert "non-empty string 'id'" in capsys.readouterr().err
 
 
