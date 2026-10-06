@@ -21,13 +21,13 @@ artifact, then install it with apt so the dependencies are resolved
 automatically:
 
 ```
-sudo apt-get install ./btrbak_1.0.2-1_all.deb
+sudo apt-get install ./btrbak_1.1.0-1_all.deb
 ```
 
 Or, if you already have `python3`, `python3-yaml`, and `btrfs-progs` installed:
 
 ```
-sudo dpkg -i btrbak_1.0.2-1_all.deb
+sudo dpkg -i btrbak_1.1.0-1_all.deb
 ```
 
 The package installs:
@@ -97,6 +97,7 @@ btrbak verify [SUBVOL] [PROFILE]
 btrbak list [SUBVOL] [PROFILE]
 btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 btrbak forget SUBVOL PROFILE SNAPSHOT_ID
+btrbak gdrive authorize --client-secret PATH [--token PATH] [--console]
 ```
 
 ## Configuration
@@ -122,6 +123,73 @@ Encryption needs recipients to *write* a backup and the identity file to
 *read* one back, so `config check` warns when `encryption.identity` is unset:
 nothing breaks operationally, but nothing encrypted under that profile can ever
 be recovered.
+
+### Google Drive remote
+
+Snapshots can be stored in your own Google Drive (a personal Gmail account) via
+OAuth. Set it up once:
+
+#### One-time OAuth client setup
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create or
+   select a project, then enable the **Google Drive API** (APIs & Services →
+   Library → search “Google Drive API” → Enable).
+2. Configure the consent screen: APIs & Services → OAuth consent screen →
+   External → fill in an app name and your email as a test user. You can leave
+   the app in “Testing” mode; your own account is added as a test user and no
+   verification is needed.
+3. Create the OAuth client: APIs & Services → Credentials → Create Credentials
+   → OAuth client ID → application type **Desktop app**. Download the JSON
+   (the “client secret”).
+
+#### On the backup host
+
+Authorize once with your Google account — btrbak prints a URL (or opens a
+browser), you sign in and grant access, and btrbak stores a refresh token:
+
+```bash
+sudo btrbak gdrive authorize \
+    --client-secret /path/to/client_secret.json \
+    --token /etc/btrbak/gdrive-token.json
+```
+
+On a headless server, add `--console` to get a URL you open elsewhere and
+paste the code back. The token file is written `0600`; it is your credential
+and must be protected like `auth.yaml`.
+
+Point `/etc/btrbak/auth.yaml` at the token file:
+
+```yaml
+# /etc/btrbak/auth.yaml
+gdrive: /etc/btrbak/gdrive-token.json
+```
+
+Then add the remote to a profile using the folder ID — the long string after
+`/folders/` in the Drive URL — or the folder’s name (a name that doesn’t exist
+yet is created automatically; a name matching several folders is rejected):
+
+```yaml
+# /etc/btrbak/profiles.d/<subvol>.yaml
+profiles:
+  hourly:
+    # ...
+    remotes:
+      - type: gdrive
+        folder: 1AbCdEfGhIjKlMnOpQrStUvWxYz
+        auth: gdrive
+```
+
+Validate that the credentials, their permissions, and folder access all work:
+
+```bash
+sudo btrbak config check
+```
+
+btrbak maps its logical paths onto a folder tree under that Drive folder:
+`meta.yaml`, `config.yaml`, and `<profile>/<snapshot-id>.send` become files,
+with profile names as intermediate folders (created on demand). Send streams
+are `age`-encrypted before upload when `encryption` is configured, so Drive
+only ever sees ciphertext.
 
 ## Removing a profile
 
@@ -208,7 +276,7 @@ Build a binary `.deb` without needing debhelper or dh-python:
 ./debian/build-deb.sh
 ```
 
-The script produces `dist/btrbak_1.0.2-1_all.deb`. It installs:
+The script produces `dist/btrbak_1.1.0-1_all.deb`. It installs:
 
 - `/usr/bin/btrbak`
 - the `btrbak` package into `/usr/lib/python3/dist-packages/btrbak`

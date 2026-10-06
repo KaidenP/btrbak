@@ -553,6 +553,10 @@ def validate(config: Config, check_remotes=True, check_nesting=True):
                     instance.validate()
             except Exception as exc:  # noqa: BLE001 - surface any remote error
                 errors.append(f"profile {profile.name}: remote {remote.id}: {exc}")
+            if remote.type == "gdrive" and isinstance(remote.settings.get("auth"), str):
+                _check_permissions(
+                    remote.settings["auth"], "gdrive credentials file", warnings
+                )
 
     if config.encryption and config.encryption["algorithm"] == "age":
         age_available = which("age")

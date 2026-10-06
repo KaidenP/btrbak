@@ -1,9 +1,11 @@
 """CLI entrypoint for btrbak."""
 
 import argparse
+import json
 import os
 import sys
 import time
+from pathlib import Path
 
 from . import config as config_mod
 from . import manifest
@@ -139,10 +141,123 @@ def build_parser() -> argparse.ArgumentParser:
     p_forget.add_argument("snapshot_id")
     p_forget.set_defaults(func=cmd_forget)
 
+    p_gdrive = sub.add_parser(
+        "gdrive",
+        help="Google Drive helper commands",
+        parents=[sub_verbosity],
+    )
+    gdrive_sub = p_gdrive.add_subparsers(dest="gdrive_command", required=True)
+    p_authorize = gdrive_sub.add_parser(
+        "authorize",
+        help="obtain OAuth credentials for a personal Google account",
+        parents=[sub_verbosity],
+    )
+    p_authorize.add_argument(
+        "--client-secret",
+        required=True,
+        metavar="PATH",
+        help="downloaded OAuth client JSON (Desktop app) from Google Cloud",
+    )
+    p_authorize.add_argument(
+        "--token",
+        default="/etc/btrbak/gdrive-token.json",
+        metavar="PATH",
+        help="where to write the credentials (default: /etc/btrbak/gdrive-token.json)",
+    )
+    p_authorize.add_argument(
+        "--console",
+        action="store_true",
+        help="use the copy/paste code flow instead of a local web server",
+    )
+    p_authorize.set_defaults(func=cmd_gdrive_authorize)
+
     return parser
 
 
 # --- run -------------------------------------------------------------------
+
+
+def cmd_gdrive_authorize(args) -> int:
+    """Run the OAuth consent flow for a personal Google account.
+
+    Writes an "authorized user" credentials file (client id/secret plus a
+    refresh token) to ``--token``; the ``gdrive`` remote then points its
+    ``auth`` value at that file.
+    """
+    try:
+        from google_auth_oauthlib.flow import InstalledAppFlow
+    except ImportError:
+        print(
+            "error: 'gdrive authorize' requires google-auth-oauthlib "
+            "(Debian: python3-google-auth-oauthlib)",
+            file=sys.stderr,
+        )
+        return 1
+
+    client_secret = Path(args.client_secret)
+    if not client_secret.is_file():
+        print(
+            f"error: client secret file not found: {client_secret}",
+            file=sys.stderr,
+        )
+        return 1
+
+    token_path = Path(args.token)
+    try:
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(
+            f"error: cannot create {token_path.parent}: {exc}", file=sys.stderr
+        )
+        return 1
+
+    flow = InstalledAppFlow.from_client_secrets_file(
+        str(client_secret), scopes=["https://www.googleapis.com/auth/drive"]
+    )
+    try:
+        if args.console:
+            creds = flow.run_console()
+        else:
+            creds = flow.run_local_server(port=0)
+    except KeyboardInterrupt:
+        raise  # main() reports a clean "interrupted" and exits 130
+    except Exception as exc:  # noqa: BLE001 - consent flow failures are user-facing
+        print(f"error: authorization failed: {exc}", file=sys.stderr)
+        return 1
+
+    data = {
+        "type": "authorized_user",
+        "client_id": creds.client_id,
+        "client_secret": creds.client_secret,
+        "refresh_token": creds.refresh_token,
+        "token": creds.token,
+        "token_uri": creds.token_uri,
+        "scopes": creds.scopes,
+    }
+    tmp = token_path.with_name(token_path.name + ".tmp")
+    try:
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+        os.replace(tmp, token_path)
+    except OSError as exc:
+        print(f"error: cannot write {token_path}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    print(f"wrote credentials to {token_path}")
+    print(
+        "reference it from /etc/btrbak/auth.yaml (e.g. `gdrive: "
+        f"{token_path}`), set the gdrive remote's `folder` to the folder ID, "
+        "and run `btrbak config check`"
+    )
+    return 0
 
 
 def _discover(subvol):

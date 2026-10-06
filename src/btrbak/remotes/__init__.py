@@ -2,11 +2,13 @@
 
 from .base import Remote, RemoteError
 from .dir import DirRemote
+from .gdrive import GdriveRemote
 
 __all__ = ["REGISTRY", "Remote", "create_remote"]
 
 REGISTRY = {
     "dir": DirRemote,
+    "gdrive": GdriveRemote,
 }
 
 

@@ -771,8 +771,33 @@ class Remote(ABC):
 - `write` creates parent directories and writes to a temp file then `os.replace`
   (atomic); `read`/`delete` are direct filesystem operations.
 
+`src/btrbak/remotes/gdrive.py` — `GdriveRemote`:
+
+- `type: gdrive`
+- required settings: `folder` (the Drive folder ID, or a folder name / a
+  slash-separated path such as `backups/btrbak`) and an `auth:` key whose
+  resolved value is the absolute path to an OAuth
+  credentials file (client id/secret + refresh token) produced by
+  `btrbak gdrive authorize`. Authorization is against a personal Google
+  account, so the folder is simply one the account owns.
+- Maps `remote_path` → `<folder>/<remote_path>`; each intermediate component is
+  a Drive folder, created on demand by `write`.
+- A slash-separated `folder` is resolved level-by-level (each missing component
+  created), so `folder: backups/btrbak` creates `backups` at the top level of
+  "My Drive" and `btrbak` inside it.
+- Drive files are ID-addressed and names are not unique, so the backend
+  resolves each name→ID with a `files.list` query scoped to the parent folder,
+  and refuses (rather than guesses) when a name matches more than one object.
+- `write` uploads with a resumable upload and, when the file already exists,
+  updates it by ID so the old content is replaced only once the upload
+  completes; `read` streams via `files.get_media`; `delete` is an idempotent
+  `files.delete` by ID.
+- The Google API client is imported lazily inside this module, so a `dir`-only
+  installation never needs it installed.
+
 Registry: `src/btrbak/remotes/__init__.py` maps `type` string → class, e.g.
-`{"dir": DirRemote}`. Adding a remote = new module + one registry entry.
+`{"dir": DirRemote, "gdrive": GdriveRemote}`. Adding a remote = new module + one
+registry entry.
 
 Errors: all remote failures raise `RemoteError` (defined in `base.py`); callers
 treat upload failures as non-fatal (mark `failed`, retry later) and never prune
@@ -789,6 +814,7 @@ btrbak verify [SUBVOL] [PROFILE]
 btrbak list [SUBVOL] [PROFILE]
 btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 btrbak forget SUBVOL PROFILE SNAPSHOT_ID
+btrbak gdrive authorize --client-secret PATH [--token PATH] [--console]
 ```
 
 - Global: `--verbose/-v`, repeatable. Accepted either before or after the
@@ -897,6 +923,13 @@ btrbak forget SUBVOL PROFILE SNAPSHOT_ID
   was waiting to have deleted — then the entry is removed from `meta.yaml`,
   which is saved and pushed like any other manifest change. It requires the
   local manifest (the source of truth) and holds the `dest` lock.
+- `gdrive authorize --client-secret PATH [--token PATH] [--console]` runs the
+  OAuth consent flow for a personal Google account and writes an
+  authorized-user credentials file (client id/secret + refresh token) to
+  `--token` (default `/etc/btrbak/gdrive-token.json`), created `0600`.
+  `--console` uses the copy/paste code flow instead of a local web server,
+  which is the right mode on a headless server. The `gdrive` remote then points
+  its `auth:` value at the written file (§11).
 - Logging to stderr (levels via `-v`); never log secrets or auth values, and
   subprocess error messages include only the program name (plus stderr), never
   command arguments.
@@ -968,7 +1001,8 @@ btrbak forget SUBVOL PROFILE SNAPSHOT_ID
   is an error unless `--force-config` is passed.
 - `auth.yaml` should be `0600`; the tool warns when a profile actually
   references an `auth:` key and the file is not. The age identity file, when
-  set, is held to the same `0600` standard.
+  set, is held to the same `0600` standard, as is a `gdrive` OAuth credentials
+  file.
 - The uploaded `config.yaml` copy contains no secrets as long as credentials
   are referenced via `auth:` keys into the local-only `auth.yaml`, which is
   never uploaded. Inline remote credentials written directly in a profile file
@@ -982,6 +1016,10 @@ btrbak forget SUBVOL PROFILE SNAPSHOT_ID
 
 - Python ≥ 3.10 (Linux only; btrfs is Linux-only).
 - `PyYAML`.
+- `google-api-python-client` + `google-auth` (only needed when a `gdrive`
+  remote is configured; Debian: `python3-googleapi`).
+- `google-auth-oauthlib` (only needed for `btrbak gdrive authorize`; Debian:
+  `python3-google-auth-oauthlib`).
 - `btrfs-progs` (`btrfs` binary on PATH).
 - `age` binary (only required when encryption is enabled).
 - `xz` via Python stdlib `lzma` (no external dependency).

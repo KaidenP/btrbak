@@ -69,7 +69,7 @@ Each profile is a mapping with the following keys.
 # REMOTE SETTINGS
 
 `type`
-: Required. Remote backend type. Version 1 supports `dir`.
+: Required. Remote backend type. Version 1 supports `dir` and `gdrive`.
 
 `name`
 : Optional stable identifier. When omitted, btrbak derives one from a hash of
@@ -84,6 +84,26 @@ For the `dir` backend:
 `path`
 : Required. Absolute or expandable path to the local directory that acts as
   the remote root.
+
+For the `gdrive` backend:
+
+`folder`
+: Required. The Google Drive folder that acts as the remote root: either its
+  ID (the long string after `/folders/` in the Drive URL) or a slash-separated
+  path of folder names (e.g. `btrbak/test`). Each component of a path is
+  created at the previous level if it does not exist, so `btrbak/test` becomes
+  a folder `btrbak` at the top level of "My Drive" containing `test`. A
+  component that matches several folders is rejected (use the ID instead).
+
+`auth`
+: Required. Key into `/etc/btrbak/auth.yaml` whose value is the absolute path
+  to an OAuth credentials file produced by `btrbak gdrive authorize` (it holds
+  the client id/secret and a refresh token). The file should be `0600`.
+
+btrbak maps its logical paths (`meta.yaml`, `config.yaml`,
+`<profile>/<snapshot-id>.send`) onto a folder tree under that Drive folder,
+creating the root and intermediate profile folders on demand. Uploads are
+resumable and replace the previous object only once complete.
 
 # TIMESPANS
 
@@ -143,6 +163,25 @@ A bare `SUBVOL` member selects every profile in that file; a
 `SUBVOL:PROFILE` member selects a single profile. Group names follow the same
 safe-name rule as profile names. `btrbak run --group NAME` runs a group, and
 an empty group is a no-op.
+
+# GOOGLE DRIVE SETUP
+
+The `gdrive` backend authenticates with your personal Google account via OAuth:
+
+1. In Google Cloud Console, create a project, enable the Google Drive API,
+   configure the OAuth consent screen (External, add yourself as a test user),
+   and create an OAuth client ID of type **Desktop app**; download its JSON.
+2. Run `btrbak gdrive authorize --client-secret <client.json> --token
+   /etc/btrbak/gdrive-token.json` and sign in when prompted. On a headless
+   server, pass `--console` and paste the printed code back.
+3. Reference the token file from `/etc/btrbak/auth.yaml`:
+
+   ```
+   gdrive: /etc/btrbak/gdrive-token.json
+   ```
+
+4. Add the remote to a profile (`type: gdrive`, `folder: <id>`, `auth:
+   gdrive`) and run `btrbak config check` to confirm access.
 
 # FILES
 

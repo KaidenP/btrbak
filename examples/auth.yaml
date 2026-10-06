@@ -5,10 +5,14 @@
 #   chmod 600 /etc/btrbak/auth.yaml
 #
 # A profile remote can reference a key here with `auth: <key>`; btrbak merges
-# that value into the remote settings.  The v1 `dir` backend only uses `path`,
-# so credentials are mostly reserved for future remote backends, but btrbak
-# warns if this file is world-readable when a profile references it.
+# that value into the remote settings.  The `dir` backend only uses `path`, so
+# credentials are mostly reserved for other backends; the `gdrive` backend uses
+# `auth: <key>` where the value is the absolute path to the OAuth credentials
+# file written by `btrbak gdrive authorize`.
 
 # offsite:
 #   username: backup
 #   password: change-me
+
+# gdrive:
+#   /etc/btrbak/gdrive-token.json

@@ -2095,6 +2095,16 @@ def test_forget_is_wired_into_the_parser():
     assert args.func is cli.cmd_forget
 
 
+def test_gdrive_authorize_is_wired_into_the_parser():
+    args = cli.build_parser().parse_args(
+        ["gdrive", "authorize", "--client-secret", "c.json", "--console"]
+    )
+    assert args.client_secret == "c.json"
+    assert args.token == "/etc/btrbak/gdrive-token.json"
+    assert args.console is True
+    assert args.func is cli.cmd_gdrive_authorize
+
+
 def test_retry_failure_message_points_at_forget(tmp_path, monkeypatch, capsys):
     """The stuck-retry warning must name its own escape hatch."""
     cfg = _forget_setup(tmp_path, monkeypatch, [_stuck()])

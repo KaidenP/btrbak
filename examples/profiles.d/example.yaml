@@ -38,6 +38,11 @@ profiles:
         name: offsite
         path: /mnt/offsite
 
+      # Or store offsite in Google Drive (see btrbak-profiles(5)):
+      # - type: gdrive
+      #   folder: 1AbCdEfGhIjKlMnOpQrStUvWxYz   # Drive folder ID or unique name
+      #   auth: gdrive                          # key into /etc/btrbak/auth.yaml
+
   # Local-only snapshots: no remotes, so nothing is sent offsite.
   local-only:
     freq:
