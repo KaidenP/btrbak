@@ -427,6 +427,9 @@ tool. `load()` therefore validates the structure before any command touches it
 and raises a clean `error: ...` (exit `1`) rather than letting a bad field
 surface as a traceback deep inside a command:
 
+- An empty, blank, or comment-only file is treated as a not-yet-initialised
+  manifest (the same as a missing file), so `touch <dest>/meta.yaml` is not a
+  version error.
 - `version` must equal `1`; `profiles` must be a mapping; each profile entry
   must be a mapping.
 - Each snapshot must be a mapping with a **non-empty string `id`**, unique
@@ -901,7 +904,9 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   wait.
 - A remote `config.yaml` is never silently overwritten; a differing remote copy
   is an error unless `--force-config` is passed.
-- `auth.yaml` and the age identity file should be `0600`; the tool warns if not.
+- `auth.yaml` should be `0600`; the tool warns when a profile actually
+  references an `auth:` key and the file is not. The age identity file, when
+  set, is held to the same `0600` standard.
 - The uploaded `config.yaml` copy contains no secrets as long as credentials
   are referenced via `auth:` keys into the local-only `auth.yaml`, which is
   never uploaded. Inline remote credentials written directly in a profile file
