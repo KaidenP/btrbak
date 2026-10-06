@@ -6,6 +6,88 @@ incremental offsite backups via `btrfs send`.
 See `PROJECT_SPEC.md` for the full design. This implementation is a work in
 progress tracking that spec.
 
+## Installation
+
+### From the `.deb`
+
+To download the latest release and install it in one go (requires `curl`):
+
+```
+curl -sL "$(curl -sL https://api.github.com/repos/KaidenP/btrbak/releases/latest | grep -o 'https://[^"]*\.deb' | head -1)" -o /tmp/btrbak.deb && sudo apt-get install -y /tmp/btrbak.deb && rm -f /tmp/btrbak.deb
+```
+
+Build the package yourself with `./debian/build-deb.sh` or download a release
+artifact, then install it with apt so the dependencies are resolved
+automatically:
+
+```
+sudo apt-get install ./btrbak_1.0.1-1_all.deb
+```
+
+Or, if you already have `python3`, `python3-yaml`, and `btrfs-progs` installed:
+
+```
+sudo dpkg -i btrbak_1.0.1-1_all.deb
+```
+
+The package installs:
+
+- `/usr/bin/btrbak`
+- `btrbak(1)` and `btrbak-profiles(5)` manpages
+- bash and zsh completions
+- a `btrbak.service` / `btrbak.timer` systemd pair, with the timer enabled by default
+- example configuration under `/usr/share/doc/btrbak/examples/`
+
+After installing, create your configuration from the examples:
+
+```
+sudo mkdir -p /etc/btrbak/profiles.d
+sudo cp /usr/share/doc/btrbak/examples/profiles.d/example.yaml \
+    /etc/btrbak/profiles.d/<subvol>.yaml
+# Only needed if a profile references an auth key:
+sudo cp /usr/share/doc/btrbak/examples/auth.yaml /etc/btrbak/auth.yaml
+sudo chmod 600 /etc/btrbak/auth.yaml
+```
+
+Edit the copied file(s) to match your source subvolume, snapshot destination,
+remote(s), encryption, and schedule, then validate:
+
+```
+sudo btrbak config check
+```
+
+The timer runs `btrbak run` hourly. It is skipped cleanly while
+`/etc/btrbak/profiles.d` is empty, so a fresh install won't fail until you add
+at least one profile. Inspect it with:
+
+```
+systemctl status btrbak.timer
+systemctl list-timers btrbak.timer
+```
+
+Disable or re-enable the timer with:
+
+```
+sudo systemctl disable --now btrbak.timer
+sudo systemctl enable --now btrbak.timer
+```
+
+### From source
+
+For development, install in editable mode:
+
+```
+python -m pip install -e .
+```
+
+To install the command without the Debian package:
+
+```
+python -m pip install .
+```
+
+Source lives in the `btrbak` package under `src/`.
+
 ## Commands
 
 ```
@@ -126,7 +208,7 @@ Build a binary `.deb` without needing debhelper or dh-python:
 ./debian/build-deb.sh
 ```
 
-The script produces `dist/btrbak_0.1.0-1_all.deb`. It installs:
+The script produces `dist/btrbak_1.0.1-1_all.deb`. It installs:
 
 - `/usr/bin/btrbak`
 - the `btrbak` package into `/usr/lib/python3/dist-packages/btrbak`
