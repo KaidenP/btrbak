@@ -10,9 +10,11 @@ only uses the ``dir`` backend does not need it installed.
 """
 
 import os
+import tempfile
+import time
 from pathlib import Path
 
-from .base import Remote, RemoteError, RemoteNotFoundError
+from .base import Remote, RemoteError, RemoteNotFoundError, split_safe_path
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 _SCOPES = ["https://www.googleapis.com/auth/drive"]
@@ -20,6 +22,9 @@ _CHUNK = 8 * 1024 * 1024  # 8 MiB
 _ID_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
 )
+_RETRIABLE_STATUS = frozenset({403, 429, 500, 502, 503, 504})
+_MAX_RETRIES = 5
+_RETRY_BASE_DELAY = 1.0  # seconds
 _DEP_MESSAGE = (
     "the 'gdrive' remote requires the Google API client; install "
     "google-api-python-client and google-auth (Debian: python3-googleapi)"
@@ -47,6 +52,19 @@ class GdriveRemote(Remote):
         if not self.credentials_path.is_file():
             raise RemoteError(
                 f"gdrive credentials file not found: {self.credentials_path}"
+            )
+        # OAuth refresh tokens are secrets: refuse anything not readable /
+        # writable only by its owner (0600).
+        try:
+            mode = os.stat(self.credentials_path).st_mode
+        except OSError as exc:
+            raise RemoteError(
+                f"cannot stat gdrive credentials file: {self.credentials_path}"
+            ) from exc
+        if mode & 0o777 != 0o600:
+            raise RemoteError(
+                f"gdrive credentials file must be mode 0600: "
+                f"{self.credentials_path}"
             )
 
         # ``service`` is only supplied by tests; production builds it lazily so
@@ -79,14 +97,16 @@ class GdriveRemote(Remote):
         # for ID-shaped values.
         if _looks_like_id(self.folder):
             return self._resolve_folder_by_id(svc)
+        return self._resolve_folder_by_name(svc)
 
+    def _resolve_folder_by_name(self, svc) -> str:
         # ``folder`` may be a path such as "btrbak/test": resolve or create
         # each level in turn, starting from the top level of "My Drive".
         parts = self.folder.split("/")
         if any(part in ("", ".", "..") for part in parts):
             raise RemoteError(f"invalid gdrive folder path: {self.folder!r}")
-        parent_id = None
-        for name in parts:
+        parent_id = self._ensure_folder(svc, None, parts[0])
+        for name in parts[1:]:
             parent_id = self._ensure_folder(svc, parent_id, name)
         return parent_id
 
@@ -102,9 +122,12 @@ class GdriveRemote(Remote):
                 raise RemoteError(f"gdrive: {exc}") from exc
             meta = None
         if meta is None:
-            # A folder ID that does not resolve is almost certainly a
-            # typo or a deleted folder; never create a folder named with
-            # an opaque ID.
+            # A value that is not *definitely* an ID (a long folder name made
+            # of ID-like characters) should fall back to name-based
+            # resolution; a definite ID that 404s is a typo or a deleted
+            # folder and must not be recreated as a name.
+            if not _is_definitely_id(self.folder):
+                return self._resolve_folder_by_name(svc)
             raise RemoteError(f"gdrive folder not found: {self.folder!r}")
         if meta.get("trashed"):
             raise RemoteError(
@@ -122,17 +145,20 @@ class GdriveRemote(Remote):
         if cached is not None:
             return cached
         if parent_id is None:
-            # Top level of "My Drive": no ``parents`` constraint.
+            # Top level of "My Drive": no ``parents`` constraint. Restrict to
+            # folders the user owns (not merely shared with them).
             q = (
                 f"name = '{_quote(name)}' and "
-                f"mimeType = '{FOLDER_MIME}' and trashed = false"
+                f"mimeType = '{FOLDER_MIME}' and trashed = false and "
+                f"'me' in owners"
             )
         else:
             q = (
                 f"name = '{_quote(name)}' and '{parent_id}' in parents and "
-                f"mimeType = '{FOLDER_MIME}' and trashed = false"
+                f"mimeType = '{FOLDER_MIME}' and trashed = false and "
+                f"'me' in owners"
             )
-        matches = _list(svc, q)
+        matches = _list(svc, q, corpora="user")
         if not matches:
             return None
         if len(matches) > 1:
@@ -253,8 +279,15 @@ class GdriveRemote(Remote):
 
         local_dest = Path(local_dest)
         local_dest.parent.mkdir(parents=True, exist_ok=True)
-        # Downloads are raw backup data; never let them land world-readable.
-        fd = os.open(str(local_dest), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Download to a temp file in the destination directory and atomically
+        # replace, so a failed download never leaves a partial file. mkstemp
+        # creates the temp file (and hence the final file) as 0600: downloads
+        # are raw backup data and must never land world-readable.
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(local_dest.parent),
+            prefix=local_dest.name + ".",
+            suffix=".tmp",
+        )
         try:
             with os.fdopen(fd, "wb") as handle:
                 request = svc.files().get_media(fileId=file_id)
@@ -262,12 +295,23 @@ class GdriveRemote(Remote):
                     handle, request, chunksize=_CHUNK
                 )
                 done = False
+                attempt = 0
                 while not done:
-                    _status, done = downloader.next_chunk()
-        except Exception as exc:  # noqa: BLE001
-            if _is_not_found(exc):
-                raise RemoteNotFoundError(str(exc)) from exc
-            raise RemoteError(f"gdrive: {exc}") from exc
+                    try:
+                        _status, done = downloader.next_chunk()
+                        attempt = 0
+                    except Exception as exc:  # noqa: BLE001
+                        if _is_retriable(exc) and attempt < _MAX_RETRIES:
+                            time.sleep(_retry_delay(exc, attempt))
+                            attempt += 1
+                            continue
+                        if _is_not_found(exc):
+                            raise RemoteNotFoundError(str(exc)) from exc
+                        raise RemoteError(f"gdrive: {exc}") from exc
+            os.replace(tmp_name, local_dest)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
 
 
 # --- helpers ---------------------------------------------------------------
@@ -314,14 +358,7 @@ def _authorized_http(credentials):
 
 
 def _split_path(remote_path: str) -> list[str]:
-    if not isinstance(remote_path, str) or not remote_path:
-        raise RemoteError(f"invalid remote path: {remote_path!r}")
-    if remote_path.startswith("/") or remote_path != remote_path.strip():
-        raise RemoteError(f"invalid remote path: {remote_path!r}")
-    parts = remote_path.split("/")
-    if any(part in ("", ".", "..") for part in parts):
-        raise RemoteError(f"invalid remote path: {remote_path!r}")
-    return parts
+    return split_safe_path(remote_path)
 
 
 def _quote(value: str) -> str:
@@ -330,23 +367,86 @@ def _quote(value: str) -> str:
 
 
 def _looks_like_id(value: str) -> bool:
-    return len(value) >= 20 and all(ch in _ID_CHARS for ch in value)
+    # Real Drive IDs are ~28+ chars; short all-ID-char values are far more
+    # likely to be folder names.
+    return len(value) >= 28 and all(ch in _ID_CHARS for ch in value)
 
 
-def _list(svc, q: str) -> list[dict]:
-    resp = svc.files().list(q=q, fields="files(id, name)", pageSize=1000).execute()
-    return resp.get("files", [])
+def _is_definitely_id(value: str) -> bool:
+    # ~33 chars matches a real Drive ID; a shorter all-ID-char value is
+    # ambiguous and should fall back to name resolution on a 404.
+    return len(value) >= 33 and all(ch in _ID_CHARS for ch in value)
+
+
+def _list(svc, q: str, corpora: str | None = None) -> list[dict]:
+    items: list[dict] = []
+    page_token = None
+    while True:
+        kwargs: dict = {
+            "q": q,
+            "fields": "files(id, name), nextPageToken",
+            "pageSize": 1000,
+        }
+        if corpora is not None:
+            kwargs["corpora"] = corpora
+        if page_token is not None:
+            kwargs["pageToken"] = page_token
+        resp = _run(svc.files().list(**kwargs))
+        items.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            return items
 
 
 def _run(request):
+    attempt = 0
+    while True:
+        try:
+            return request.execute()
+        except RemoteError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if _is_retriable(exc) and attempt < _MAX_RETRIES:
+                time.sleep(_retry_delay(exc, attempt))
+                attempt += 1
+                continue
+            if _is_not_found(exc):
+                raise RemoteNotFoundError(str(exc)) from exc
+            raise RemoteError(f"gdrive: {exc}") from exc
+
+
+def _is_retriable(exc) -> bool:
+    """True for transient errors worth retrying (rate limit / 5xx / reset)."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status in _RETRIABLE_STATUS:
+        return True
+    return isinstance(exc, (ConnectionError, TimeoutError))
+
+
+def _retry_after_seconds(exc) -> float | None:
+    """Best-effort ``Retry-After`` (seconds) from an HTTP error."""
+    resp = getattr(exc, "resp", None)
+    headers = getattr(resp, "headers", None)
+    value = None
+    if isinstance(headers, dict):
+        value = headers.get("Retry-After", headers.get("retry-after"))
+    if value is None:
+        get = getattr(resp, "get", None)
+        if callable(get):
+            value = get("retry-after")
+    if value is None or not isinstance(value, (int, float, str)):
+        return None
     try:
-        return request.execute()
-    except RemoteError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        if _is_not_found(exc):
-            raise RemoteNotFoundError(str(exc)) from exc
-        raise RemoteError(f"gdrive: {exc}") from exc
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _retry_delay(exc, attempt: int) -> float:
+    delay = _retry_after_seconds(exc)
+    if delay is not None:
+        return delay
+    return _RETRY_BASE_DELAY * (2 ** attempt)
 
 
 def _is_not_found(exc) -> bool:

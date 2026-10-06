@@ -17,6 +17,23 @@ class RemoteNotFoundError(RemoteError):
     """Raised when a requested remote file does not exist."""
 
 
+def split_safe_path(remote_path: str) -> list[str]:
+    """Split *remote_path* into safe components.
+
+    Rejects absolute paths, empty or whitespace-only components, and the
+    ``.`` / ``..`` entries so a logical path can never escape its remote
+    root. Shared by the ``dir`` and ``gdrive`` remotes.
+    """
+    if not isinstance(remote_path, str) or not remote_path:
+        raise RemoteError(f"invalid remote path: {remote_path!r}")
+    if remote_path.startswith("/") or remote_path != remote_path.strip():
+        raise RemoteError(f"invalid remote path: {remote_path!r}")
+    parts = remote_path.split("/")
+    if any(part in ("", ".", "..") or not part.strip() for part in parts):
+        raise RemoteError(f"invalid remote path: {remote_path!r}")
+    return parts
+
+
 class Remote(ABC):
     """Path-based interface implemented by every remote backend."""
 

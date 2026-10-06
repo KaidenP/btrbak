@@ -12,7 +12,12 @@ import pytest
 
 from btrbak.remotes import REGISTRY, create_remote
 from btrbak.remotes.base import RemoteError, RemoteNotFoundError
-from btrbak.remotes.gdrive import FOLDER_MIME, GdriveRemote, _authorized_http
+from btrbak.remotes.gdrive import (
+    FOLDER_MIME,
+    GdriveRemote,
+    _authorized_http,
+    _list,
+)
 
 ROOT_ID = "0123456789abcdefghijklmnopqrstuv"  # 32 chars, ID-shaped
 
@@ -101,15 +106,20 @@ class _Files:
     def __init__(self, drive):
         self.drive = drive
 
-    def list(self, q, fields=None, pageSize=None):
+    def list(self, q, fields=None, pageSize=None, corpora=None, pageToken=None):
         def run():
-            return {
-                "files": [
-                    {"id": i["id"], "name": i["name"], "mimeType": i["mimeType"]}
-                    for i in self.drive.items.values()
-                    if _match(i, q)
-                ]
-            }
+            matching = [
+                {"id": i["id"], "name": i["name"], "mimeType": i["mimeType"]}
+                for i in self.drive.items.values()
+                if _match(i, q)
+            ]
+            size = pageSize if pageSize is not None else len(matching)
+            start = int(pageToken) if pageToken is not None else 0
+            page = matching[start:start + size]
+            result: dict = {"files": page}
+            if start + size < len(matching):
+                result["nextPageToken"] = str(start + size)
+            return result
 
         return _Request(run)
 
@@ -178,6 +188,7 @@ def make_remote(tmp_path):
     def _make(fake, folder=ROOT_ID):
         creds = tmp_path / "service-account.json"
         creds.write_text("{}")
+        creds.chmod(0o600)
         return GdriveRemote(
             {"type": "gdrive", "folder": folder, "auth": str(creds)},
             service=fake,
@@ -218,6 +229,7 @@ def test_registry_maps_gdrive():
 def test_create_remote_constructs_gdrive(tmp_path):
     creds = tmp_path / "sa.json"
     creds.write_text("{}")
+    creds.chmod(0o600)
     spec = type(
         "Spec",
         (),
@@ -336,7 +348,9 @@ def test_validate_resolves_root_by_id(drive, make_remote):
 
 
 def test_validate_root_id_not_found_raises(drive, make_remote):
-    missing = "zyxwvutsrqponmlkjihgfedcba987654"
+    # 34 chars: definitely ID-shaped, so a 404 must raise (never be
+    # recreated as a folder name).
+    missing = "zyxwvutsrqponmlkjihgfedcba98765432"
     remote = make_remote(drive, folder=missing)
     with pytest.raises(RemoteError):
         remote.validate()
@@ -415,3 +429,55 @@ def test_authorized_http_disables_redirect_following():
     # RedirectMissingLocation. The upload code reads the Range header itself.
     authorized = _authorized_http(object())
     assert authorized.follow_redirects is False
+
+
+def test_list_paginates_beyond_1000(drive):
+    # A broad listing must walk every page (pageSize=1000): without the
+    # nextPageToken loop, >1000 matches would silently truncate.
+    for _ in range(2500):
+        drive.add(ROOT_ID, "file.send", "application/octet-stream", b"x")
+    items = _list(drive, "name = 'file.send'", corpora="user")
+    assert len(items) == 2500
+
+
+def test_credentials_file_wrong_mode_rejected(tmp_path):
+    creds = tmp_path / "sa.json"
+    creds.write_text("{}")
+    creds.chmod(0o644)
+    with pytest.raises(RemoteError):
+        GdriveRemote(
+            {"type": "gdrive", "folder": ROOT_ID, "auth": str(creds)}
+        )
+
+
+def test_download_creates_0600(monkeypatch, make_remote, tmp_path):
+    import googleapiclient.http
+
+    class _FakeDownloader:
+        def __init__(self, fd, request, chunksize=None):
+            self._fd = fd
+
+        def next_chunk(self):
+            self._fd.write(b"downloaded")
+            return None, True  # (status, done)
+
+    class _FakeSvc:
+        class _Files:
+            def get_media(self, fileId):
+                return object()
+
+        def files(self):
+            return self._Files()
+
+    monkeypatch.setattr(
+        googleapiclient.http, "MediaIoBaseDownload", _FakeDownloader
+    )
+
+    fake = FakeDrive()
+    fake.add_root(ROOT_ID)
+    remote = make_remote(fake)
+    dest = tmp_path / "out.bin"
+    remote._download(_FakeSvc(), "whatever", dest)
+
+    assert dest.read_bytes() == b"downloaded"
+    assert (dest.stat().st_mode & 0o777) == 0o600
