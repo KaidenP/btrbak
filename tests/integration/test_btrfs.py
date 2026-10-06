@@ -11,6 +11,7 @@ import subprocess
 from dataclasses import replace
 
 import pytest
+import yaml
 
 from btrbak import cli
 from btrbak import manifest
@@ -465,7 +466,6 @@ def test_verify_reports_a_snapshot_whose_remotes_were_all_removed(btrfs_fs, monk
     cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
 
     # The remote is removed from the profile; the snapshot keeps no uploads.
-    spec = cfg.profiles["daily"].remotes[0]
     local_only = replace(
         cfg, profiles={"daily": replace(cfg.profiles["daily"], remotes=[])}
     )
@@ -495,3 +495,94 @@ def test_verify_leaves_no_staging_directory(btrfs_fs, monkeypatch):
 
     assert cli._verify_config(cfg) == 0
     assert not (cfg.tmpdir / cfg.name / util.VERIFY_SCRATCH).exists()
+
+
+def test_restore_rejects_a_hand_edited_codec_without_a_traceback(btrfs_fs, monkeypatch):
+    """A malformed `compression` in meta.yaml must be a clean error.
+
+    meta.yaml is untrusted input -- the disaster-recovery path downloads it
+    from a remote -- and its per-snapshot codec is fed straight into the xz
+    decoder. A scalar where a mapping belongs used to raise AttributeError out
+    of the CLI's top level and print a traceback.
+    """
+    mnt = btrfs_fs
+    src, snapshots, target = _setup(mnt, "codec")
+    remote_root = mnt / "codec" / "remote"
+    tmpdir = mnt / "codec" / "tmp"
+    remote_root.mkdir()
+    tmpdir.mkdir()
+    cfg = _pipeline_cfg(mnt, "codec", src, snapshots, remote_root, tmpdir)
+
+    (src / "a.txt").write_text("a\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 0)
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
+    snap_id = manifest.snapshots(manifest.load(snapshots / "meta.yaml"), "daily")[0]["id"]
+
+    meta = manifest.load(snapshots / "meta.yaml")
+    manifest.snapshots(meta, "daily")[0]["compression"] = "xz"
+    with open(snapshots / "meta.yaml", "w") as handle:
+        yaml.safe_dump(meta, handle)
+
+    with pytest.raises(util.BtrbakError, match="'compression' must be a mapping"):
+        restore.run_restore(cfg, "daily", snap_id, target)
+    assert not target.exists()
+
+
+def test_restore_reports_a_truncated_xz_stream_as_a_clean_error(btrfs_fs, monkeypatch):
+    """A corrupt send stream must not surface as a raw LZMAError/EOFError."""
+    mnt = btrfs_fs
+    src, snapshots, target = _setup(mnt, "truncated")
+    remote_root = mnt / "truncated" / "remote"
+    tmpdir = mnt / "truncated" / "tmp"
+    remote_root.mkdir()
+    tmpdir.mkdir()
+
+    cfg = replace(
+        _pipeline_cfg(mnt, "truncated", src, snapshots, remote_root, tmpdir),
+        compression={"algorithm": "xz", "level": 1},
+    )
+    (src / "a.txt").write_text("a\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 0)
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
+    meta = manifest.load(snapshots / "meta.yaml")
+    snap = manifest.snapshots(meta, "daily")[0]
+
+    # Publish a truncated object *and* record it faithfully, so the manifest
+    # checksum check passes and the decoder is what rejects it.
+    send_file = remote_root / snap["file"]
+    send_file.write_bytes(send_file.read_bytes()[: len(send_file.read_bytes()) // 2])
+    snap["sha256"] = util.sha256_file(send_file)
+    snap["size"] = send_file.stat().st_size
+    with open(snapshots / "meta.yaml", "w") as handle:
+        yaml.safe_dump(meta, handle)
+
+    with pytest.raises(util.BtrbakError, match="xz (decompression failed|stream is truncated)"):
+        restore.run_restore(cfg, "daily", snap["id"], target)
+
+
+def test_verify_reports_a_profile_removed_from_the_config(btrfs_fs, monkeypatch, capsys):
+    """Deleting a profile must not strand its snapshots in silence."""
+    mnt = btrfs_fs
+    src, snapshots, _target = _setup(mnt, "retired")
+    remote_root = mnt / "retired" / "remote"
+    tmpdir = mnt / "retired" / "tmp"
+    remote_root.mkdir()
+    tmpdir.mkdir()
+    cfg = _pipeline_cfg(mnt, "retired", src, snapshots, remote_root, tmpdir)
+
+    (src / "a.txt").write_text("a\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 0)
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
+    assert cli._verify_config(cfg) == 0
+
+    # The profile disappears from the config; its snapshot, its offsite object
+    # and its manifest entry all stay put.
+    without = replace(cfg, profiles={})
+    assert manifest.snapshots(manifest.load(snapshots / "meta.yaml"), "daily")
+    assert (remote_root / "daily").exists()
+
+    assert cli._verify_config(without, configured=set()) == 0
+    out = capsys.readouterr().out
+    assert "ORPHANED PROFILE retired/daily" in out
+    assert "no longer configured" in out
+    assert "1 orphaned profile(s)" in out

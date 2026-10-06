@@ -1631,3 +1631,257 @@ def test_main_reports_malformed_manifest_cleanly(monkeypatch, tmp_path, capsys):
 
     assert cli.main(["list"]) == 1
     assert "non-empty string 'id'" in capsys.readouterr().err
+
+
+# --- orphaned profiles ------------------------------------------------------
+#
+# Nothing prunes, verifies or lists a profile the config does not define, so
+# deleting a profile silently strands its subvolumes, its offsite objects and
+# its meta.yaml entry forever. These tests pin the reporting that makes the
+# strand visible.
+
+
+def _orphan_setup(tmp_path, monkeypatch, extra_snapshots=1, snapshots_override=None):
+    cfg, _remote = _verify_setup(
+        tmp_path,
+        monkeypatch,
+        [_sent()] if snapshots_override is None else snapshots_override,
+    )
+    meta = manifest.load(cfg.dest / "meta.yaml")
+    meta["profiles"]["retired"] = {
+        "src": str(cfg.src),
+        "snapshots": [
+            _sent(id=f"old{i}", uploads=[{"remote": "offsite", "status": "complete"}])
+            for i in range(extra_snapshots)
+        ],
+    }
+    manifest.save(cfg.dest / "meta.yaml", meta)
+    return cfg
+
+
+def test_verify_reports_an_orphaned_profile(tmp_path, monkeypatch, capsys):
+    _orphan_setup(tmp_path, monkeypatch)
+    assert cli.cmd_verify(_verify_args()) == 0
+    out = capsys.readouterr().out
+    assert "ORPHANED PROFILE root/retired" in out
+    assert "no longer configured" in out
+    # An orphan is informational: an admin may legitimately keep the data.
+    assert "1 orphaned profile(s)" in out
+
+
+def test_verify_orphan_line_singularises_a_single_snapshot(tmp_path, monkeypatch, capsys):
+    _orphan_setup(tmp_path, monkeypatch, extra_snapshots=1)
+    cli.cmd_verify(_verify_args())
+    out = capsys.readouterr().out
+    assert "1 snapshot recorded in meta.yaml" in out
+
+
+def test_verify_orphan_summary_counts_plural(tmp_path, monkeypatch, capsys):
+    _orphan_setup(tmp_path, monkeypatch, extra_snapshots=2)
+    cli.cmd_verify(_verify_args())
+    out = capsys.readouterr().out
+    assert "2 snapshots recorded in meta.yaml" in out
+
+
+def test_verify_is_clean_without_orphans(tmp_path, monkeypatch, capsys):
+    _verify_setup(tmp_path, monkeypatch, [_sent()])
+    assert cli.cmd_verify(_verify_args()) == 0
+    out = capsys.readouterr().out
+    assert "ORPHANED" not in out
+    assert out.strip().endswith("root: ok")
+
+
+def test_verify_does_not_report_a_filtered_out_profile_as_orphaned(
+    tmp_path, monkeypatch, capsys
+):
+    """`verify PROFILE` narrows the selection; the rest are not orphans."""
+    cfg, _remote = _verify_setup(tmp_path, monkeypatch, [_sent()])
+    weekly = _profile("weekly", 7 * 86400, 86400, 30 * 86400, [_remote_spec(tmp_path)])
+    full = cli.config_mod.replace(cfg, profiles={**cfg.profiles, "weekly": weekly})
+    selected = cli.config_mod.select_profiles(full, "daily")
+    meta = manifest.load(full.dest / "meta.yaml")
+    meta["profiles"]["weekly"] = {"src": str(full.src), "snapshots": [_sent(id="w1")]}
+    manifest.save(full.dest / "meta.yaml", meta)
+    monkeypatch.setattr(
+        cli,
+        "collect_remotes",
+        lambda cfg: {
+            pname: [(spec, _VerifyRemote()) for spec in p.remotes]
+            for pname, p in cfg.profiles.items()
+        },
+    )
+
+    assert cli._verify_config(selected, configured=set(full.profiles)) == 0
+    out = capsys.readouterr().out
+    assert "ORPHANED" not in out
+    assert out.strip().endswith("root: ok")
+
+
+def test_verify_reports_a_genuinely_removed_profile_even_when_filtering(
+    tmp_path, monkeypatch, capsys
+):
+    _orphan_setup(tmp_path, monkeypatch)
+    assert cli.cmd_verify(_verify_args(profile="daily")) == 0
+    out = capsys.readouterr().out
+    assert "ORPHANED PROFILE root/retired" in out
+
+
+def test_orphaned_profiles_ignores_profiles_only_filtered_out():
+    meta = {"profiles": {"daily": {"snapshots": []}, "retired": {"snapshots": []}}}
+    assert cli.orphaned_profiles(meta, {"daily", "retired"}) == []
+    assert cli.orphaned_profiles(meta, {"daily"}) == ["retired"]
+
+
+def test_list_reports_an_orphaned_profile(tmp_path, monkeypatch, capsys):
+    _orphan_setup(tmp_path, monkeypatch)
+    assert cli.cmd_list(SimpleNamespace(subvol=None, profile=None)) == 0
+    out = capsys.readouterr().out
+    assert "ORPHANED PROFILE root/retired" in out
+
+
+def test_run_warns_about_an_orphaned_profile(tmp_path, monkeypatch, capsys):
+    """The timer-driven path must surface the strand without failing the run."""
+    cfg = _orphan_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg, **kw: ([], []))
+    monkeypatch.setattr(cli, "collect_remotes", lambda cfg: {"daily": []})
+    monkeypatch.setattr(cli, "sync_settings", lambda cfg, remotes, force: None)
+    monkeypatch.setattr(cli, "clean_tmpdir", lambda cfg, max_age=86400: None)
+    monkeypatch.setattr(cli.util, "now", lambda: 1000)
+
+    assert cli.run_config(cfg, None, False, False, False, False, configured=set(cfg.profiles)) == 0
+    err = capsys.readouterr().err
+    assert "warning: root/retired" in err
+    assert "no longer pruned or verified" in err
+
+
+def test_run_dry_run_warns_about_an_orphaned_profile(tmp_path, monkeypatch, capsys):
+    cfg = _orphan_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg, **kw: ([], []))
+    monkeypatch.setattr(cli, "dry_run_config_sync", lambda cfg, remotes, force: None)
+
+    assert cli.run_config(cfg, None, False, False, False, True, configured=set(cfg.profiles)) == 0
+    assert "warning: root/retired" in capsys.readouterr().err
+
+
+# --- dry-run reports pending upload retries ---------------------------------
+
+
+def _dry_run_setup(tmp_path, monkeypatch, snapshots):
+    cfg, _remote = _verify_setup(tmp_path, monkeypatch, snapshots)
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg, **kw: ([], []))
+    monkeypatch.setattr(cli, "dry_run_config_sync", lambda cfg, remotes, force: None)
+    monkeypatch.setattr(cli.util, "now", lambda: 1000)
+    return cfg
+
+
+def test_dry_run_reports_a_pending_upload_retry(tmp_path, monkeypatch, capsys):
+    """No complete copy anywhere, so the snapshot must be re-sent."""
+    cfg = _dry_run_setup(
+        tmp_path,
+        monkeypatch,
+        [_sent(uploads=[{"remote": "offsite", "status": "failed"}])],
+    )
+    assert cli.run_config(cfg, None, False, False, False, True) == 0
+    out = capsys.readouterr().out
+    assert "would re-send and upload s1 to offsite" in out
+
+
+def test_dry_run_reports_only_the_missing_remote_on_a_retry(tmp_path, monkeypatch, capsys):
+    """A new remote is backfilled from an existing complete copy: no re-send."""
+    kept = _remote_spec(tmp_path, rid="offsite")
+    added = _remote_spec(tmp_path, rid="new-remote")
+    cfg = _orphan_setup(tmp_path, monkeypatch, extra_snapshots=0)
+    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [kept, added])
+    cfg = cli.config_mod.replace(cfg, profiles={"daily": profile})
+    manifest.save(
+        cfg.dest / "meta.yaml",
+        {
+            "version": 1,
+            "profiles": {
+                "daily": {
+                    "snapshots": [
+                        _sent(
+                            uploads=[
+                                {"remote": "offsite", "status": "complete"},
+                                {"remote": "new-remote", "status": "failed"},
+                            ]
+                        )
+                    ]
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg, **kw: ([], []))
+    monkeypatch.setattr(cli, "dry_run_config_sync", lambda cfg, remotes, force: None)
+    monkeypatch.setattr(cli.util, "now", lambda: 1000)
+
+    assert cli.run_config(cfg, None, False, False, False, True) == 0
+    out = capsys.readouterr().out
+    assert "would retry upload of s1 on new-remote" in out
+    assert "re-send" not in out
+
+
+def test_dry_run_re_sends_when_the_only_complete_copy_left_the_profile(
+    tmp_path, monkeypatch, capsys
+):
+    """A copy on a removed remote cannot be reused, so the snapshot re-sends."""
+    added = _remote_spec(tmp_path, rid="new-remote")
+    cfg = _orphan_setup(tmp_path, monkeypatch, extra_snapshots=0)
+    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [added])
+    cfg = cli.config_mod.replace(cfg, profiles={"daily": profile})
+    manifest.save(
+        cfg.dest / "meta.yaml",
+        {
+            "version": 1,
+            "profiles": {
+                "daily": {
+                    "snapshots": [
+                        _sent(
+                            uploads=[
+                                {"remote": "offsite", "status": "complete"},
+                                {"remote": "new-remote", "status": "failed"},
+                            ]
+                        )
+                    ]
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg, **kw: ([], []))
+    monkeypatch.setattr(cli, "dry_run_config_sync", lambda cfg, remotes, force: None)
+    monkeypatch.setattr(cli.util, "now", lambda: 1000)
+
+    assert cli.run_config(cfg, None, False, False, False, True) == 0
+    out = capsys.readouterr().out
+    assert "would re-send and upload s1 to new-remote" in out
+
+
+def test_dry_run_stays_quiet_for_a_committed_snapshot(tmp_path, monkeypatch, capsys):
+    cfg = _dry_run_setup(tmp_path, monkeypatch, [_sent()])
+    assert cli.run_config(cfg, None, False, False, False, True) == 0
+    out = capsys.readouterr().out
+    assert "retry upload" not in out
+
+
+def test_pending_upload_remotes_matches_retry_upload_semantics():
+    snap = {"uploads": [{"remote": "a", "status": "complete"}]}
+    assert cli.pending_upload_remotes(snap, ["a", "b"]) == ["b"]
+    assert cli.pending_upload_remotes(snap, ["a"]) == []
+    assert cli.pending_upload_remotes({"uploads": []}, ["a"]) == ["a"]
+    assert cli.pending_upload_remotes({}, ["a"]) == ["a"]
+
+
+# --- scratch directories are namespaced away from profile names -------------
+
+
+def test_verify_reports_orphans_alongside_failures(tmp_path, monkeypatch, capsys):
+    """A config can be drifting and stranding at once; both must be visible."""
+    _orphan_setup(
+        tmp_path,
+        monkeypatch,
+        snapshots_override=[_sent(uploads=[{"remote": "offsite", "status": "failed"}])],
+    )
+    assert cli.cmd_verify(_verify_args()) == 1
+    out = capsys.readouterr().out
+    assert "INCOMPLETE root/daily/s1" in out
+    assert "ORPHANED PROFILE root/retired" in out

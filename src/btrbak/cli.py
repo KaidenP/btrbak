@@ -151,13 +151,16 @@ def cmd_run(args) -> int:
         selected = config_mod.select_profiles(cfg, args.profile)
         if selected is None:
             continue
-        selected_configs.append(selected)
+        # The unfiltered profile names travel with the selection so a run can
+        # tell an orphaned manifest profile apart from one merely filtered out
+        # by PROFILE.
+        selected_configs.append((selected, set(cfg.profiles)))
     if args.profile and not selected_configs:
         raise config_mod.ConfigError(f"unknown profile: {args.profile!r}")
 
     upload_failures = 0
     runtime_failures = 0
-    for cfg in selected_configs:
+    for cfg, configured in selected_configs:
         try:
             upload_failures += run_config(
                 cfg,
@@ -166,6 +169,7 @@ def cmd_run(args) -> int:
                 args.force_config,
                 args.full,
                 args.dry_run,
+                configured=configured,
             )
         except config_mod.ConfigError as exc:
             config_errors += 1
@@ -183,7 +187,9 @@ def cmd_run(args) -> int:
     return 1 if upload_failures or runtime_failures else 0
 
 
-def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
+def run_config(
+    cfg, profile_filter, force, force_config, full, dry_run, configured=None
+) -> int:
     selected = config_mod.filter_profiles(cfg, profile_filter)
     errors, warnings = config_mod.validate(
         selected, check_remotes=not dry_run, check_nesting=False
@@ -206,8 +212,11 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
             print(f"{message}; Ctrl-C within 5s to abort", file=sys.stderr)
             time.sleep(5)
 
+    configured_profiles = set(cfg.profiles) if configured is None else set(configured)
+
     if dry_run:
         meta = manifest.load(selected.dest / "meta.yaml")
+        _warn_orphans(selected.name, meta, configured_profiles)
         now_ts = util.now()
         for pname, profile in selected.profiles.items():
             due, stype, parent = compute_plan(profile, meta, now_ts, force, full)
@@ -218,6 +227,33 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
                 )
             else:
                 print(f"[dry-run] {selected.name}/{pname}: nothing due")
+
+        # Uploads that are still outstanding are retried before anything new
+        # is created, so a dry run that stayed silent about them would
+        # under-report the work a real run does (§12).
+        for pname, profile in selected.profiles.items():
+            for snap in manifest.snapshots(meta, pname):
+                if manifest.committed(snap):
+                    continue
+                remote_ids = [spec.id for spec in profile.remotes]
+                pending = pending_upload_remotes(snap, remote_ids)
+                if not pending:
+                    continue
+                # retry_upload() only re-sends when no remote still holds a
+                # copy matching the recorded checksum; otherwise it reuses
+                # that copy (age is non-deterministic, so re-sending would
+                # change the bytes). The preview says which path it expects.
+                reusable = [rid for rid in remote_ids if rid not in pending]
+                if reusable:
+                    print(
+                        f"[dry-run] {selected.name}/{pname}: would retry upload of "
+                        f"{snap.get('id')} on {', '.join(pending)}"
+                    )
+                else:
+                    print(
+                        f"[dry-run] {selected.name}/{pname}: would re-send and "
+                        f"upload {snap.get('id')} to {', '.join(pending)}"
+                    )
 
         dry_run_config_sync(selected, collect_remotes(selected), force_config)
 
@@ -230,6 +266,7 @@ def run_config(cfg, profile_filter, force, force_config, full, dry_run) -> int:
     with util.exclusive_lock(selected.dest / ".btrbak.lock"):
         meta_path = selected.dest / "meta.yaml"
         meta = manifest.load(meta_path)
+        _warn_orphans(selected.name, meta, configured_profiles)
         ensure_profile_meta(meta, selected)
         by_profile = collect_remotes(selected)
         sync_settings(selected, unique_remotes(by_profile), force_config)
@@ -422,6 +459,7 @@ def retry_upload(cfg, profile, snap, remotes) -> int:
     pname = profile.name
     uploads = snap.setdefault("uploads", [])
     by_remote = {spec.id: (spec, remote) for spec, remote in remotes}
+    remote_ids = [spec.id for spec, _ in remotes]
 
     def is_complete(rid):
         return any(
@@ -429,7 +467,7 @@ def retry_upload(cfg, profile, snap, remotes) -> int:
             for u in uploads
         )
 
-    pending = [rid for rid in by_remote if not is_complete(rid)]
+    pending = pending_upload_remotes(snap, remote_ids)
     if not pending:
         return 0
 
@@ -703,6 +741,67 @@ def ensure_profile_meta(meta, cfg) -> None:
         entry.update(rest)
 
 
+def orphaned_profiles(meta, configured) -> list[str]:
+    """Return the manifest profiles that are no longer configured.
+
+    Nothing prunes, verifies or lists a profile that the config does not
+    define, so deleting a profile from its config file silently orphans
+    everything that profile left behind: the subvolumes under
+    ``<dest>/<profile>/``, the offsite objects, and the ``meta.yaml`` entry
+    itself all stay put forever. Reporting them is the only signal that those
+    copies now need removing by hand (§12).
+
+    *configured* must be the profile names of the **unfiltered** config: with
+    ``btrbak list SUBVOL PROFILE`` every other profile is absent from the
+    selection but is not orphaned, and comparing against the selection would
+    report all of them.
+    """
+    recorded = meta.get("profiles") or {}
+    return sorted(set(recorded) - set(configured))
+
+
+def pending_upload_remotes(snap, remote_ids) -> list[str]:
+    """Return the remotes *snap* still owes a ``complete`` upload to.
+
+    Shared by ``retry_upload`` and ``--dry-run`` so the preview and the real
+    run agree on what is outstanding.
+    """
+    complete = {
+        upload.get("remote")
+        for upload in (snap.get("uploads") or [])
+        if upload.get("status") == "complete"
+    }
+    return [rid for rid in remote_ids if rid not in complete]
+
+
+def _warn_orphans(where, meta, configured) -> None:
+    """Surface profiles recorded in the manifest but absent from the config."""
+    for pname in orphaned_profiles(meta, configured):
+        count = len(manifest.snapshots(meta, pname))
+        plural = "snapshot" if count == 1 else "snapshots"
+        print(
+            f"warning: {where}/{pname}: {count} {plural} recorded in meta.yaml "
+            "but the profile is no longer configured; they are no longer pruned "
+            "or verified, so remove them by hand or restore the profile",
+            file=sys.stderr,
+        )
+
+
+def report_orphans(where, meta, configured) -> int:
+    """Print one ``ORPHANED PROFILE`` line per unconfigured manifest profile."""
+    orphans = orphaned_profiles(meta, configured)
+    for pname in orphans:
+        count = len(manifest.snapshots(meta, pname))
+        plural = "snapshot" if count == 1 else "snapshots"
+        print(
+            f"ORPHANED PROFILE {where}/{pname}: {count} {plural} recorded in "
+            "meta.yaml but the profile is no longer configured; they are no "
+            "longer pruned or verified, so remove them by hand or restore the "
+            "profile"
+        )
+    return len(orphans)
+
+
 def unique_snapshot_id(base, profile_dir, meta=None, profile=None) -> str:
     """Return a snapshot id not already in use in *profile_dir* or *meta*.
 
@@ -832,6 +931,7 @@ def cmd_list(args) -> int:
                 "listing nothing",
                 file=sys.stderr,
             )
+        report_orphans(cfg.name, meta, cfg.profiles)
         for pname in selected.profiles:
             snaps = manifest.snapshots(meta, pname)
             count = f" ({len(snaps)} snapshot{'' if len(snaps) == 1 else 's'})" if snaps else ""
@@ -914,7 +1014,7 @@ def cmd_verify(args) -> int:
             continue
 
         try:
-            total_failures += _verify_config(selected)
+            total_failures += _verify_config(selected, configured=cfg.profiles)
         except (util.BtrbakError, RemoteError, OSError) as exc:
             print(f"error ({cfg.name}): {exc}", file=sys.stderr)
             total_failures += 1
@@ -925,8 +1025,15 @@ def cmd_verify(args) -> int:
     return 1 if total_failures else 0
 
 
-def _verify_config(cfg) -> int:
-    """Verify one config; return the number of failures found."""
+def _verify_config(cfg, configured=None) -> int:
+    """Verify one config; return the number of failures found.
+
+    *configured* is the set of profile names in the **unfiltered** config.
+    It defaults to ``cfg.profiles`` (correct when no PROFILE filter is in
+    play) but must be passed when one is, so that profiles merely filtered
+    out are not reported as orphans.
+    """
+    configured_profiles = set(cfg.profiles) if configured is None else set(configured)
     with util.exclusive_lock(cfg.tmpdir / (cfg.name + ".lock")):
         failures = 0
         meta, used_remote = _load_meta_for_verify(cfg)
@@ -940,16 +1047,25 @@ def _verify_config(cfg) -> int:
             )
         by_profile = collect_remotes(cfg)
         with util.scratch_dir(
-        cfg.tmpdir / cfg.name / util.VERIFY_SCRATCH, cfg.tmpdir
-    ) as tmpdir:
+            cfg.tmpdir / cfg.name / util.VERIFY_SCRATCH, cfg.tmpdir
+        ) as tmpdir:
             for pname in cfg.profiles:
                 lookup = {spec.id: (spec, remote) for spec, remote in by_profile[pname]}
                 for snap in manifest.snapshots(meta, pname):
                     failures += _verify_snapshot(
                         cfg, meta, pname, snap, lookup, tmpdir
                     )
+        # Reported on both paths: a config can be drifting and stranding at
+        # once, and the run that finally surfaces the strand is not one to
+        # wait for.
+        orphans = report_orphans(cfg.name, meta, configured_profiles)
         if failures == 0:
-            print(f"{cfg.name}: ok")
+            # An orphan is not a failure (§12): an admin who removed a
+            # profile may legitimately keep its data around. It is called out
+            # in the summary, though, so `verify` never reads as a clean bill
+            # of health while copies nobody prunes sit on disk.
+            suffix = f" ({orphans} orphaned profile(s))" if orphans else ""
+            print(f"{cfg.name}: ok{suffix}")
         return failures
 
 
