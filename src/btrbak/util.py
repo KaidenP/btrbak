@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -78,17 +79,34 @@ def snapshot_id(ts=None) -> str:
 
 
 @contextlib.contextmanager
-def exclusive_lock(path):
-    """Acquire a non-blocking exclusive ``flock`` on *path*.
+def exclusive_lock(path, timeout=None):
+    """Acquire an exclusive ``flock`` on *path*.
 
-    Raises :class:`BtrbakError` when another process already holds the lock.
+    Raises :class:`BtrbakError` when another process holds the lock for
+    longer than *timeout* seconds; with the default ``timeout=None`` the
+    acquisition is non-blocking and a held lock fails immediately.
+
+    ``run`` uses the non-blocking form (a timer-driven run should skip rather
+    than queue behind a long restore), while ``verify``/``restore``/``forget``
+    pass a timeout so the brief moment a concurrent ``run`` holds the tmpdir
+    lock for its staging sweep does not fail them outright.
     """
     fd = _open_lock(path)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise BtrbakError(f"lock is held by another process: {path}")
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if deadline is None:
+                    raise BtrbakError(f"lock is held by another process: {path}")
+                if time.monotonic() >= deadline:
+                    raise BtrbakError(
+                        f"lock is held by another process: {path} "
+                        f"(waited {timeout:g}s)"
+                    )
+                time.sleep(0.05)
         yield
     finally:
         os.close(fd)

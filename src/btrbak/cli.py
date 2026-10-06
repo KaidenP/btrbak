@@ -18,6 +18,10 @@ from .remotes.base import RemoteError, RemoteNotFoundError
 
 VERBOSITY = 0
 
+#: Seconds ``verify``/``restore``/``forget`` wait for a lock another command
+#: holds only briefly (e.g. a ``run`` doing its staging sweep) before failing.
+LOCK_WAIT = 30.0
+
 
 def _log(level, message) -> None:
     if VERBOSITY >= level:
@@ -123,6 +127,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_restore.add_argument("snapshot_id")
     p_restore.add_argument("target")
     p_restore.set_defaults(func=cmd_restore)
+
+    p_forget = sub.add_parser(
+        "forget",
+        help="drop a stuck snapshot entry from the manifest",
+        parents=[sub_verbosity],
+    )
+    p_forget.add_argument("subvol")
+    p_forget.add_argument("profile")
+    p_forget.add_argument("snapshot_id")
+    p_forget.set_defaults(func=cmd_forget)
 
     return parser
 
@@ -489,7 +503,12 @@ def retry_upload(cfg, profile, snap, remotes) -> int:
         if not reuse_existing:
             snap_path = cfg.dest / pname / snap["id"]
             if not snap_path.exists():
-                print(f"snapshot {snap['id']} missing locally; cannot retry", file=sys.stderr)
+                print(
+                    f"snapshot {snap['id']} missing locally; cannot retry "
+                    f"(use `btrbak forget {cfg.name} {pname} {snap['id']}` to "
+                    "drop the entry)",
+                    file=sys.stderr,
+                )
                 return len(pending)
             parent_path = cfg.dest / pname / snap["parent"] if snap.get("parent") else None
             send.send_snapshot(
@@ -1040,7 +1059,7 @@ def _verify_config(cfg, configured=None) -> int:
     out are not reported as orphans.
     """
     configured_profiles = set(cfg.profiles) if configured is None else set(configured)
-    with util.exclusive_lock(cfg.tmpdir / (cfg.name + ".lock")):
+    with util.exclusive_lock(cfg.tmpdir / (cfg.name + ".lock"), timeout=LOCK_WAIT):
         failures = 0
         meta, used_remote = _load_meta_for_verify(cfg)
         if meta is None:
@@ -1189,8 +1208,86 @@ def cmd_restore(args) -> int:
     remote_errors = config_mod.validate_remote_config(cfg, args.profile)
     if remote_errors:
         raise config_mod.ConfigError("\n".join(remote_errors))
-    with util.exclusive_lock(cfg.tmpdir / (cfg.name + ".lock")):
+    with util.exclusive_lock(cfg.tmpdir / (cfg.name + ".lock"), timeout=LOCK_WAIT):
         restore_mod.run_restore(cfg, args.profile, args.snapshot_id, args.target)
+    return 0
+
+
+def cmd_forget(args) -> int:
+    """Drop a snapshot entry the pipeline can no longer make progress on.
+
+    A snapshot whose local subvolume is gone while its uploads never all
+    completed cannot be re-sent, so every ``run`` retries it and exits ``1``
+    forever (\u00a79.1). ``forget`` removes that entry from the manifest -- the
+    escape hatch -- after checking that nothing depends on it:
+
+    - refused when the local subvolume still exists (that snapshot is live
+      data: prune or delete the subvolume deliberately instead);
+    - refused when another snapshot lists it as ``parent`` (forgetting it
+      would break that chain's restorability);
+    - any remote object recorded for the entry (a partial upload, or the
+      object a ``local_deleted`` entry is waiting to have deleted) is removed
+      best-effort, so ``forget`` also finishes a stuck remote delete.
+    """
+    auth = config_mod.load_auth()
+    path = config_mod.config_path_for_subvol(args.subvol)
+    cfg = config_mod.load_config(path, auth)
+    remote_errors = config_mod.validate_remote_config(cfg, args.profile)
+    if remote_errors:
+        raise config_mod.ConfigError("\n".join(remote_errors))
+    if args.profile not in cfg.profiles:
+        raise util.BtrbakError(f"unknown profile: {args.profile!r}")
+
+    meta_path = cfg.dest / "meta.yaml"
+    if not meta_path.exists():
+        raise util.BtrbakError(
+            f"no local manifest at {meta_path}; the manifest is the source of "
+            "truth, so there is nothing to forget"
+        )
+
+    with util.exclusive_lock(cfg.dest / ".btrbak.lock", timeout=LOCK_WAIT):
+        meta = manifest.load(meta_path)
+        snap = manifest.get_snapshot(meta, args.profile, args.snapshot_id)
+        if snap is None:
+            raise util.BtrbakError(
+                f"snapshot not found: {args.profile}/{args.snapshot_id}"
+            )
+
+        dependents = [
+            str(other.get("id"))
+            for other in manifest.snapshots(meta, args.profile)
+            if other.get("parent") == args.snapshot_id
+        ]
+        if dependents:
+            raise util.BtrbakError(
+                f"snapshot {args.snapshot_id} is the parent of "
+                f"{', '.join(dependents)}; forget those first"
+            )
+
+        snap_path = cfg.dest / args.profile / args.snapshot_id
+        if snap_path.exists():
+            raise util.BtrbakError(
+                f"local subvolume {snap_path} still exists; forgetting it "
+                "would strand live backup data. Delete it deliberately "
+                "(btrfs subvolume delete) or let run/prune manage it, then "
+                "forget the entry"
+            )
+
+        if snap.get("file"):
+            for spec in cfg.profiles[args.profile].remotes:
+                try:
+                    create_remote(spec).delete(snap["file"])
+                except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+                    print(
+                        f"warning: remote delete on {spec.id} failed: {exc}",
+                        file=sys.stderr,
+                    )
+
+        manifest.remove_snapshot(meta, args.profile, args.snapshot_id)
+        manifest.save(meta_path, meta)
+        _push_manifest_best_effort(meta_path, collect_remotes(cfg))
+
+    print(f"forgot {cfg.name}/{args.profile}/{args.snapshot_id}")
     return 0
 
 

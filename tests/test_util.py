@@ -288,6 +288,64 @@ def test_optional_lock_does_not_raise_when_held(tmp_path):
         os.close(fd)
 
 
+def test_exclusive_lock_waits_for_release_within_timeout(tmp_path):
+    """A briefly-held lock (a run's staging sweep) must not fail verify/restore."""
+    import fcntl
+    import os
+    import threading
+
+    path = tmp_path / "a.lock"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def release():
+        import time
+
+        time.sleep(0.2)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    thread = threading.Thread(target=release)
+    thread.start()
+    try:
+        with util.exclusive_lock(path, timeout=10):
+            pass
+    finally:
+        thread.join()
+
+
+def test_exclusive_lock_timeout_expires(tmp_path):
+    import fcntl
+    import os
+
+    path = tmp_path / "a.lock"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        with pytest.raises(util.BtrbakError, match="waited"):
+            with util.exclusive_lock(path, timeout=0.2):
+                pass
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def test_exclusive_lock_default_still_fails_fast(tmp_path):
+    import fcntl
+    import os
+
+    path = tmp_path / "a.lock"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        with pytest.raises(util.BtrbakError, match="held by another process"):
+            with util.exclusive_lock(path):
+                pass
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 # --- private staging permissions --------------------------------------------
 #
 # Staged send streams are entire filesystems (decrypted plaintext during a

@@ -1899,3 +1899,165 @@ def test_verify_reports_orphans_alongside_failures(tmp_path, monkeypatch, capsys
     out = capsys.readouterr().out
     assert "INCOMPLETE root/daily/s1" in out
     assert "ORPHANED PROFILE root/retired" in out
+
+
+# --- forget ------------------------------------------------------------------
+
+
+def _stuck(snap_id="s1", **extra):
+    """A snapshot whose local subvolume is gone and whose upload never landed."""
+    entry = {
+        "id": snap_id,
+        "created": 0,
+        "type": "full",
+        "parent": None,
+        "file": f"daily/{snap_id}.send",
+        "sha256": None,
+        "size": None,
+        "uploads": [{"remote": "r", "status": "failed"}],
+    }
+    entry.update(extra)
+    return entry
+
+
+def _forget_setup(tmp_path, monkeypatch, snapshots, remotes=None):
+    cfg = _cfg(
+        {"daily": _profile("daily", 86400, -1, 30 * 86400, remotes or [])}
+    )
+    cfg.dest = tmp_path / "dest"
+    cfg.tmpdir = tmp_path / "tmp"
+    cfg.dest.mkdir(parents=True)
+    cfg.tmpdir.mkdir(parents=True)
+    meta = {
+        "version": 1,
+        "profiles": {"daily": {"src": str(cfg.src), "snapshots": snapshots}},
+    }
+    (cfg.dest / "meta.yaml").write_text(yaml.safe_dump(meta))
+
+    monkeypatch.setattr(cli.config_mod, "load_auth", lambda: {})
+    monkeypatch.setattr(
+        cli.config_mod, "config_path_for_subvol", lambda subvol: Path("/x/root.yaml")
+    )
+    monkeypatch.setattr(cli.config_mod, "load_config", lambda path, auth: cfg)
+    monkeypatch.setattr(cli.config_mod, "validate_remote_config", lambda c, p=None: [])
+    monkeypatch.setattr(cli, "push_manifest", lambda *a: None)
+    return cfg
+
+
+def _forget_args(snapshot_id="s1"):
+    return SimpleNamespace(subvol="root", profile="daily", snapshot_id=snapshot_id)
+
+
+def _read_meta(cfg):
+    return yaml.safe_load((cfg.dest / "meta.yaml").read_text())
+
+
+def test_forget_removes_a_stuck_entry(tmp_path, monkeypatch, capsys):
+    cfg = _forget_setup(tmp_path, monkeypatch, [_stuck()])
+    assert cli.cmd_forget(_forget_args()) == 0
+    assert _read_meta(cfg)["profiles"]["daily"]["snapshots"] == []
+    assert "forgot root/daily/s1" in capsys.readouterr().out
+
+
+def test_forget_refuses_a_snapshot_that_is_a_parent(tmp_path, monkeypatch):
+    child = _stuck("s2", type="incr", parent="s1")
+    cfg = _forget_setup(tmp_path, monkeypatch, [_stuck(), child])
+    with pytest.raises(cli.util.BtrbakError, match="parent of s2"):
+        cli.cmd_forget(_forget_args())
+    # manifest untouched
+    assert len(_read_meta(cfg)["profiles"]["daily"]["snapshots"]) == 2
+
+
+def test_forget_refuses_while_the_local_subvolume_exists(tmp_path, monkeypatch):
+    cfg = _forget_setup(tmp_path, monkeypatch, [_stuck()])
+    (cfg.dest / "daily" / "s1").mkdir(parents=True)
+    with pytest.raises(cli.util.BtrbakError, match="still exists"):
+        cli.cmd_forget(_forget_args())
+    assert len(_read_meta(cfg)["profiles"]["daily"]["snapshots"]) == 1
+
+
+def test_forget_refuses_an_unknown_snapshot(tmp_path, monkeypatch):
+    _forget_setup(tmp_path, monkeypatch, [_stuck()])
+    with pytest.raises(cli.util.BtrbakError, match="snapshot not found"):
+        cli.cmd_forget(_forget_args("nope"))
+
+
+def test_forget_refuses_an_unknown_profile(tmp_path, monkeypatch):
+    _forget_setup(tmp_path, monkeypatch, [_stuck()])
+    args = SimpleNamespace(subvol="root", profile="weekly", snapshot_id="s1")
+    with pytest.raises(cli.util.BtrbakError, match="unknown profile"):
+        cli.cmd_forget(args)
+
+
+def test_forget_requires_a_local_manifest(tmp_path, monkeypatch):
+    cfg = _forget_setup(tmp_path, monkeypatch, [_stuck()])
+    (cfg.dest / "meta.yaml").unlink()
+    with pytest.raises(cli.util.BtrbakError, match="no local manifest"):
+        cli.cmd_forget(_forget_args())
+
+
+def test_forget_deletes_the_remote_object_best_effort(tmp_path, monkeypatch, capsys):
+    """A partial upload (or a local_deleted pending delete) must not survive."""
+
+    class _Recorder:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def validate(self):
+            pass
+
+        def read(self, remote_path, local_dest):
+            raise NotImplementedError
+
+        def write(self, local_src, remote_path):
+            raise NotImplementedError
+
+        def delete(self, remote_path):
+            deleted.append(remote_path)
+
+    deleted = []
+    monkeypatch.setattr(cli, "create_remote", _Recorder)
+    cfg = _forget_setup(
+        tmp_path,
+        monkeypatch,
+        [_stuck()],
+        remotes=[RemoteSpec("r", "dir", {"type": "dir", "path": "/x"})],
+    )
+    assert cli.cmd_forget(_forget_args()) == 0
+    assert deleted == ["daily/s1.send"]
+    assert _read_meta(cfg)["profiles"]["daily"]["snapshots"] == []
+
+
+def test_forget_survives_a_failing_remote_delete(tmp_path, monkeypatch, capsys):
+    class _Boom:
+        def __init__(self, settings):
+            pass
+
+        def delete(self, remote_path):
+            raise cli.RemoteError("remote is down")
+
+    monkeypatch.setattr(cli, "create_remote", _Boom)
+    cfg = _forget_setup(
+        tmp_path,
+        monkeypatch,
+        [_stuck()],
+        remotes=[RemoteSpec("r", "dir", {"type": "dir", "path": "/x"})],
+    )
+    assert cli.cmd_forget(_forget_args()) == 0
+    assert "remote delete on r failed" in capsys.readouterr().err
+    assert _read_meta(cfg)["profiles"]["daily"]["snapshots"] == []
+
+
+def test_forget_is_wired_into_the_parser():
+    args = cli.build_parser().parse_args(["forget", "root", "daily", "s1"])
+    assert (args.subvol, args.profile, args.snapshot_id) == ("root", "daily", "s1")
+    assert args.func is cli.cmd_forget
+
+
+def test_retry_failure_message_points_at_forget(tmp_path, monkeypatch, capsys):
+    """The stuck-retry warning must name its own escape hatch."""
+    cfg = _forget_setup(tmp_path, monkeypatch, [_stuck()])
+    remotes = [(RemoteSpec("r", "dir", {"type": "dir", "path": "/x"}), object())]
+    failures = cli.retry_upload(cfg, cfg.profiles["daily"], _stuck(), remotes)
+    assert failures == 1
+    assert "btrbak forget root daily s1" in capsys.readouterr().err
