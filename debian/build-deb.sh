@@ -43,6 +43,8 @@ install -d "$STAGE/usr/share/man/man5"
 install -d "$STAGE/usr/share/bash-completion/completions"
 install -d "$STAGE/usr/share/zsh/vendor-completions"
 install -d "$STAGE/usr/share/doc/btrbak"
+install -d "$STAGE/usr/share/doc/btrbak/examples/profiles.d"
+install -d "$STAGE/usr/lib/systemd/system"
 install -d -m 0755 "$STAGE/etc/btrbak/profiles.d"
 
 # --- python package --------------------------------------------------------
@@ -106,6 +108,18 @@ chmod 0644 "$STAGE/usr/share/man/man1/btrbak.1.gz" "$STAGE/usr/share/man/man5/bt
 install -m 0644 "$ROOT/completions/bash/btrbak" "$STAGE/usr/share/bash-completion/completions/btrbak"
 install -m 0644 "$ROOT/completions/zsh/_btrbak" "$STAGE/usr/share/zsh/vendor-completions/_btrbak"
 
+# --- example configuration -------------------------------------------------
+install -m 0644 "$ROOT/examples/profiles.d/example.yaml" \
+    "$STAGE/usr/share/doc/btrbak/examples/profiles.d/example.yaml"
+install -m 0644 "$ROOT/examples/auth.yaml" \
+    "$STAGE/usr/share/doc/btrbak/examples/auth.yaml"
+
+# --- systemd service and timer --------------------------------------------
+install -m 0644 "$ROOT/debian/systemd/btrbak.service" \
+    "$STAGE/usr/lib/systemd/system/btrbak.service"
+install -m 0644 "$ROOT/debian/systemd/btrbak.timer" \
+    "$STAGE/usr/lib/systemd/system/btrbak.timer"
+
 # --- documentation ---------------------------------------------------------
 install -m 0644 "$ROOT/debian/copyright" "$STAGE/usr/share/doc/btrbak/copyright"
 gzip -9n -c "$ROOT/debian/changelog" > "$STAGE/usr/share/doc/btrbak/changelog.Debian.gz"
@@ -129,6 +143,11 @@ chmod 0644 "$STAGE/DEBIAN/control"
         | sed 's#  \./#  #'
 ) > "$STAGE/DEBIAN/md5sums"
 chmod 0644 "$STAGE/DEBIAN/md5sums"
+
+# --- maintainer scripts ----------------------------------------------------
+install -m 0755 "$ROOT/debian/postinst" "$STAGE/DEBIAN/postinst"
+install -m 0755 "$ROOT/debian/prerm" "$STAGE/DEBIAN/prerm"
+install -m 0755 "$ROOT/debian/postrm" "$STAGE/DEBIAN/postrm"
 
 # --- build -----------------------------------------------------------------
 mkdir -p "$ROOT/dist"

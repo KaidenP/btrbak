@@ -1,0 +1,14 @@
+# Example btrbak auth file.
+#
+# Copy this file to /etc/btrbak/auth.yaml and make it readable only by root:
+#
+#   chmod 600 /etc/btrbak/auth.yaml
+#
+# A profile remote can reference a key here with `auth: <key>`; btrbak merges
+# that value into the remote settings.  The v1 `dir` backend only uses `path`,
+# so credentials are mostly reserved for future remote backends, but btrbak
+# warns if this file is world-readable when a profile references it.
+
+# offsite:
+#   username: backup
+#   password: change-me

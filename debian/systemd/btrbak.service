@@ -1,0 +1,14 @@
+[Unit]
+Description=btrbak snapshot and offsite backup run
+Documentation=man:btrbak(1)
+After=local-fs.target
+# Skip cleanly until the admin drops at least one profile into
+# /etc/btrbak/profiles.d. This lets the timer be enabled by default on a
+# freshly installed system without producing failed units.
+ConditionDirectoryNotEmpty=/etc/btrbak/profiles.d
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/btrbak run
+Nice=10
+IOSchedulingClass=idle

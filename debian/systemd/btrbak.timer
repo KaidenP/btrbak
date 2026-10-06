@@ -1,0 +1,14 @@
+[Unit]
+Description=Run btrbak regularly
+Documentation=man:btrbak(1)
+
+[Timer]
+# Run hourly; btrbak itself decides what is due from each profile's freq
+# settings. RandomizedDelaySec spreads runs out so many hosts don't fire at
+# exactly the same moment.
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

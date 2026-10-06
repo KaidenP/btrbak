@@ -1,0 +1,47 @@
+# Example btrbak profile file.
+#
+# Copy this file to /etc/btrbak/profiles.d/<name>.yaml and edit it to match a
+# real btrfs source subvolume and snapshot destination. The file stem becomes
+# the SUBVOL selector, so for this file it is `example`.
+#
+# All paths must be absolute, and `src` and `dest` must be on the same btrfs
+# filesystem. See btrbak-profiles(5) for the full format.
+
+src: /mnt/data
+dest: /mnt/backups/data
+tmpdir: /var/tmp/btrbak
+
+# Optional xz compression applied to offsite send streams.
+compression:
+  algorithm: xz
+  level: 6
+
+# Optional age encryption applied to offsite send streams.  Recipients may be
+# inline age1... public keys or absolute paths to recipients files.  `identity`
+# is the absolute path to the private key required to restore; without it a
+# backup can be written but never restored.
+encryption:
+  algorithm: age
+  recipients:
+    - age1qxy...   # replace with a real recipient
+  identity: /root/.config/age/keys.txt
+
+profiles:
+  # Offsite hourly increments, rolled into a weekly full, kept for a month.
+  hourly:
+    freq:
+      full: 1w
+      incr: 1h
+    keep: 1mo
+    remotes:
+      - type: dir
+        name: offsite
+        path: /mnt/offsite
+
+  # Local-only snapshots: no remotes, so nothing is sent offsite.
+  local-only:
+    freq:
+      full: 1w
+      incr: -1
+    keep: 2mo
+    remotes: []

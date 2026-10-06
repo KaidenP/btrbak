@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|purge|disappear)
+        if [ -d /run/systemd/system ]; then
+            deb-systemd-helper disable btrbak.timer >/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

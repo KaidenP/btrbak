@@ -147,6 +147,32 @@ Completion sources live in `completions/`.
 A GitHub Actions workflow (`.github/workflows/build-deb.yml`) builds the
 `.deb` on every push and pull request and uploads it as a build artifact.
 
+## Examples and scheduled runs
+
+The package installs example configuration under
+`/usr/share/doc/btrbak/examples/`:
+
+- `profiles.d/example.yaml` — a sample source-subvolume profile file
+- `auth.yaml` — a sample remote-credentials file
+
+Copy and edit these into `/etc/btrbak/` before running.
+
+A systemd timer is installed and enabled by default:
+
+```
+systemctl status btrbak.timer
+systemctl list-timers btrbak.timer
+```
+
+`btrbak.timer` runs `/usr/bin/btrbak run` hourly. The service skips cleanly
+while `/etc/btrbak/profiles.d` is empty, so a fresh install does not fail
+until you add at least one profile. Disable or re-enable it with:
+
+```
+sudo systemctl disable --now btrbak.timer
+sudo systemctl enable --now btrbak.timer
+```
+
 ## Development
 
 Install the project in editable mode to expose the `btrbak` command:
