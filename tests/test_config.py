@@ -252,6 +252,14 @@ def test_config_path_for_subvol_missing(tmp_path, monkeypatch):
         config.config_path_for_subvol("nope")
 
 
+def test_config_path_for_subvol_rejects_a_directory(tmp_path, monkeypatch):
+    """A directory named <subvol>.yaml is a config error, not an OSError."""
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    (tmp_path / "root.yaml").mkdir()
+    with pytest.raises(config.ConfigError, match="not a regular file"):
+        config.config_path_for_subvol("root")
+
+
 @pytest.mark.parametrize(
     "subvol",
     [

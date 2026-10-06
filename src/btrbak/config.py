@@ -120,8 +120,9 @@ def _validate_profile_name(name, path) -> None:
 
 
 def _is_safe_name(name) -> bool:
-    text = str(name)
-    return bool(SUBVOL_NAME_RE.match(text)) and text not in (".", "..")
+    # The pattern already requires an alphanumeric first character, so '.'
+    # and '..' can never match.
+    return bool(SUBVOL_NAME_RE.match(str(name)))
 
 
 def _require_absolute(value, label: str, path) -> None:
@@ -238,8 +239,15 @@ def config_path_for_subvol(subvol) -> Path:
     _validate_subvol_name(subvol)
     for ext in (".yaml", ".yml"):
         path = CONFIG_DIR / f"{subvol}{ext}"
-        if path.exists():
+        if path.is_file():
             return path
+        if path.exists():
+            # Without this, a directory named <subvol>.yaml would surface as
+            # an IsADirectoryError runtime error (exit 1) instead of the
+            # config error (exit 2) it is.
+            raise ConfigError(
+                f"config path for subvol {subvol!r} is not a regular file: {path}"
+            )
     raise ConfigError(f"no config file for subvol {subvol!r} in {CONFIG_DIR}")
 
 

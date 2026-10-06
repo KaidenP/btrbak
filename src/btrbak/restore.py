@@ -142,10 +142,10 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
 
     # Validate the whole chain, and the resume point, before creating the
     # target: a rejected restore must never leave an empty directory behind.
+    # Every chain id is guaranteed present in by_id: build_chain just walked
+    # the same index and raised on anything missing.
     for sid in chain:
-        snap = by_id.get(sid)
-        if snap is None:
-            raise BtrbakError(f"missing snapshot in chain: {sid}")
+        snap = by_id[sid]
         if snap.get("type") == "local":
             raise BtrbakError(
                 f"snapshot {sid} is local-only and has no offsite copy; "
@@ -170,9 +170,7 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
     # file is then reused for that link, so this costs no extra download.
     staged: Path | None = None
     if pending:
-        first = by_id.get(pending[0])
-        if first is None:
-            raise BtrbakError(f"missing snapshot in chain: {pending[0]}")
+        first = by_id[pending[0]]
         staged = tmpdir / f"{pending[0]}.send"
         try:
             download_link(pick_remote(first, remote_map), first, staged)
@@ -188,9 +186,7 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
 
     try:
         for index, sid in enumerate(pending):
-            snap = by_id.get(sid)
-            if snap is None:
-                raise BtrbakError(f"missing snapshot in chain: {sid}")
+            snap = by_id[sid]
             tmpfile = staged if index == 0 else tmpdir / f"{sid}.send"
             try:
                 if index:

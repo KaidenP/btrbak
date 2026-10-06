@@ -683,8 +683,9 @@ def sync_settings(cfg, remotes, force_config) -> None:
                 remote.write(cfg.path, "config.yaml")
             elif state == "differs":
                 raise util.BtrbakError(
-                    f"remote {spec.id} already has a different config.yaml; "
-                    "use --force-config to overwrite"
+                    f"remote {spec.id} already has a different config.yaml "
+                    "(a remote root cannot be shared between different config "
+                    "files); use --force-config to overwrite"
                 )
 
 
