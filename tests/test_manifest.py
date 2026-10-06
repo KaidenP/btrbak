@@ -48,7 +48,7 @@ def test_load_treats_blank_manifest_as_default(tmp_path, content):
 
 def test_committed_and_last():
     meta = manifest.default()
-    manifest.add_snapshot(meta, "p", {"id": "a", "type": "full", "uploads": [{"remote": "r", "status": "complete"}]})
+    manifest.add_snapshot(meta, "p", {"id": "a", "type": "full", "file": "p/a.send", "uploads": [{"remote": "r", "status": "complete"}]})
     manifest.add_snapshot(
         meta,
         "p",
@@ -110,6 +110,7 @@ def test_last_committed_prefers_live_over_local_deleted():
         {
             "id": "b",
             "type": "full",
+            "file": "p/b.send",
             "uploads": [{"remote": "r", "status": "complete"}],
         },
     )

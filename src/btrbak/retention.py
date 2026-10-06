@@ -10,6 +10,10 @@ def plan_prune(meta: dict, profile_name: str, keep: int, now_ts: int) -> list[st
     and all of its uploads are complete. Deleting a leaf may make its parent
     deletable, so this repeats until a fixed point is reached.
     """
+    if keep <= 0:
+        # A non-positive retention window would otherwise delete every
+        # snapshot; treat it as "prune nothing" rather than destroy the chain.
+        return []
     snaps = [snap for snap in snapshots(meta, profile_name) if snap.get("id")]
     remaining = {snap["id"] for snap in snaps}
     order: list[str] = []
@@ -24,6 +28,7 @@ def plan_prune(meta: dict, profile_name: str, keep: int, now_ts: int) -> list[st
             snap
             for snap in snaps
             if snap["id"] in remaining
+            and created(snap) > 0
             and now_ts - created(snap) >= keep
             and snap["id"] not in parents
             and committed(snap)

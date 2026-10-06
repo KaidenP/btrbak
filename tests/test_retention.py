@@ -55,3 +55,30 @@ def test_local_only_prunes_by_age():
 def test_orphan_full_without_children_deleted():
     meta = _meta([_snap("full", 1000)])
     assert plan_prune(meta, "p", 10, 5000) == ["full"]
+
+
+def test_missing_created_is_not_pruned():
+    """A hand-edited entry without `created` must not be pruned as epoch-old."""
+    meta = _meta(
+        [{"id": "full", "type": "full", "uploads": [{"remote": "r", "status": "complete"}]}]
+    )
+    assert plan_prune(meta, "p", 10, 5000) == []
+
+
+def test_empty_profile_prunes_nothing():
+    assert plan_prune(_meta([]), "p", 10, 5000) == []
+
+
+def test_interleaved_chains_prune_independently():
+    meta = _meta(
+        [
+            _snap("a-full", 1000),
+            _snap("a-incr", 2000, "a-full"),
+            _snap("b-full", 1000),
+            _snap("b-incr", 2000, "b-full"),
+        ]
+    )
+    pruned = plan_prune(meta, "p", 10, 5000)
+    assert set(pruned) == {"a-full", "a-incr", "b-full", "b-incr"}
+    assert pruned.index("a-incr") < pruned.index("a-full")
+    assert pruned.index("b-incr") < pruned.index("b-full")
