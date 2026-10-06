@@ -1,0 +1,7 @@
+// Create a btrbak snapshot before packages are installed or upgraded.
+//
+// Runs the `apt` group from /etc/btrbak/groups.yaml via
+// /usr/lib/btrbak/btrbak-apt-pre.  The group is empty by default, so this is
+// a no-op until members are added there.
+
+DPkg::Pre-Invoke { "/usr/lib/btrbak/btrbak-apt-pre || true"; };

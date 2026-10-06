@@ -1,0 +1,12 @@
+# btrbak snapshot groups.
+#
+# Each group is a list of SUBVOL or SUBVOL:PROFILE members.  SUBVOL is the
+# stem of a file in /etc/btrbak/profiles.d.  A bare SUBVOL selects every
+# profile in that file; SUBVOL:PROFILE selects a single profile.
+#
+# The apt and boot hooks installed with this package run the `apt` and `boot`
+# groups below.  They are empty by default, so those hooks are no-ops until
+# members are added here.
+
+apt: []
+boot: []

@@ -1445,6 +1445,47 @@ def test_run_reports_an_unloadable_config_and_still_runs_the_rest(tmp_path, monk
     assert "bad profile" in capsys.readouterr().err
 
 
+def test_run_empty_group_warns_and_is_a_noop(monkeypatch, capsys):
+    monkeypatch.setattr(cli.config_mod, "load_groups", lambda: {"apt": []})
+    args = SimpleNamespace(
+        subvol=None, profile=None, group="apt", force=True,
+        force_config=False, full=False, dry_run=False,
+    )
+    assert cli.cmd_run(args) == 0
+    assert "group 'apt' is empty" in capsys.readouterr().err
+
+
+def test_run_group_rejects_positional_selectors():
+    args = SimpleNamespace(
+        subvol="root", profile=None, group="apt", force=False,
+        force_config=False, full=False, dry_run=False,
+    )
+    with pytest.raises(cli.config_mod.ConfigError):
+        cli.cmd_run(args)
+
+
+def test_discover_group_bare_member_selects_all_profiles(monkeypatch):
+    daily = _profile("daily", 86400, -1, 30 * 86400)
+    weekly = _profile("weekly", 7 * 86400, -1, 30 * 86400)
+    cfg = _cfg({"daily": daily, "weekly": weekly})
+    monkeypatch.setattr(cli.config_mod, "load_groups", lambda: {
+        "apt": [("root", None), ("root", "weekly")],
+    })
+    monkeypatch.setattr(cli.config_mod, "load_auth", lambda: {})
+    monkeypatch.setattr(
+        cli.config_mod,
+        "config_path_for_subvol",
+        lambda subvol: Path(f"/etc/btrbak/profiles.d/{subvol}.yaml"),
+    )
+    monkeypatch.setattr(cli.config_mod, "load_config", lambda path, auth: cfg)
+
+    results = cli._discover_group("apt")
+    assert len(results) == 1
+    _path, selected, error = results[0]
+    assert error is None
+    assert set(selected.profiles) == {"daily", "weekly"}
+
+
 def test_list_reports_an_unloadable_config_and_still_lists_the_rest(tmp_path, monkeypatch, capsys):
     good = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
     good.dest = tmp_path / "dest"

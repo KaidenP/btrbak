@@ -44,7 +44,10 @@ install -d "$STAGE/usr/share/bash-completion/completions"
 install -d "$STAGE/usr/share/zsh/vendor-completions"
 install -d "$STAGE/usr/share/doc/btrbak"
 install -d "$STAGE/usr/share/doc/btrbak/examples/profiles.d"
+install -d "$STAGE/usr/share/doc/btrbak/examples/scripts"
 install -d "$STAGE/usr/lib/systemd/system"
+install -d "$STAGE/usr/lib/btrbak"
+install -d "$STAGE/etc/apt/apt.conf.d"
 install -d -m 0755 "$STAGE/etc/btrbak/profiles.d"
 
 # --- python package --------------------------------------------------------
@@ -113,12 +116,21 @@ install -m 0644 "$ROOT/examples/profiles.d/example.yaml" \
     "$STAGE/usr/share/doc/btrbak/examples/profiles.d/example.yaml"
 install -m 0644 "$ROOT/examples/auth.yaml" \
     "$STAGE/usr/share/doc/btrbak/examples/auth.yaml"
+install -m 0755 "$ROOT/examples/scripts/btrbak-snapshot-now" \
+    "$STAGE/usr/share/doc/btrbak/examples/scripts/btrbak-snapshot-now"
 
-# --- systemd service and timer --------------------------------------------
+# --- systemd units ---------------------------------------------------------
 install -m 0644 "$ROOT/debian/systemd/btrbak.service" \
     "$STAGE/usr/lib/systemd/system/btrbak.service"
 install -m 0644 "$ROOT/debian/systemd/btrbak.timer" \
     "$STAGE/usr/lib/systemd/system/btrbak.timer"
+install -m 0644 "$ROOT/debian/systemd/btrbak-snapshot-boot.service" \
+    "$STAGE/usr/lib/systemd/system/btrbak-snapshot-boot.service"
+
+# --- default groups and apt hook ------------------------------------------
+install -m 0644 "$ROOT/debian/groups.yaml" "$STAGE/etc/btrbak/groups.yaml"
+install -m 0755 "$ROOT/debian/btrbak-apt-pre" "$STAGE/usr/lib/btrbak/btrbak-apt-pre"
+install -m 0644 "$ROOT/debian/apt/80btrbak" "$STAGE/etc/apt/apt.conf.d/80btrbak"
 
 # --- documentation ---------------------------------------------------------
 install -m 0644 "$ROOT/debian/copyright" "$STAGE/usr/share/doc/btrbak/copyright"
@@ -143,6 +155,9 @@ chmod 0644 "$STAGE/DEBIAN/control"
         | sed 's#  \./#  #'
 ) > "$STAGE/DEBIAN/md5sums"
 chmod 0644 "$STAGE/DEBIAN/md5sums"
+
+# --- conffiles -------------------------------------------------------------
+install -m 0644 "$ROOT/debian/conffiles" "$STAGE/DEBIAN/conffiles"
 
 # --- maintainer scripts ----------------------------------------------------
 install -m 0755 "$ROOT/debian/postinst" "$STAGE/DEBIAN/postinst"

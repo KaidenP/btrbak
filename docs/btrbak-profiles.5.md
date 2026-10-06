@@ -124,6 +124,26 @@ profiles:
         path: /mnt/offsite
 ```
 
+# GROUPS
+
+Snapshot groups are defined in `/etc/btrbak/groups.yaml`. A group is a list
+of `SUBVOL` or `SUBVOL:PROFILE` members, where `SUBVOL` is the stem of a file
+in `/etc/btrbak/profiles.d`.
+
+```
+apt:
+  - root
+  - var:weekly
+boot:
+  - root
+  - var
+```
+
+A bare `SUBVOL` member selects every profile in that file; a
+`SUBVOL:PROFILE` member selects a single profile. Group names follow the same
+safe-name rule as profile names. `btrbak run --group NAME` runs a group, and
+an empty group is a no-op.
+
 # FILES
 
 `/etc/btrbak/profiles.d/*.yaml`
@@ -131,6 +151,9 @@ profiles:
 
 `/etc/btrbak/auth.yaml`
 : Remote credentials referenced by `auth` keys.
+
+`/etc/btrbak/groups.yaml`
+: Snapshot group definitions.
 
 # SEE ALSO
 

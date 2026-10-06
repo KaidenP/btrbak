@@ -26,6 +26,7 @@ from .util import (
 
 CONFIG_DIR = Path("/etc/btrbak/profiles.d")
 AUTH_PATH = Path("/etc/btrbak/auth.yaml")
+GROUP_PATH = Path("/etc/btrbak/groups.yaml")
 DEFAULT_TMPDIR = Path("/var/tmp/btrbak")
 
 # Profile names become path components under `dest` (`<dest>/<profile>/<id>`)
@@ -272,6 +273,80 @@ def select_profiles(config: Config, name: str | None) -> Config | None:
     if name not in config.profiles:
         return None
     return replace(config, profiles={name: config.profiles[name]})
+
+
+def select_profile_names(config: Config, names) -> Config:
+    """Return *config* restricted to *names*, or unchanged when *names* is empty."""
+    if not names:
+        return config
+    return replace(config, profiles={name: config.profiles[name] for name in names})
+
+
+def load_groups(path=None) -> dict[str, list[tuple[str, str | None]]]:
+    """Load and return snapshot groups from ``groups.yaml``.
+
+    A missing file is an empty group set, not an error: the shipped default has
+    empty ``apt`` and ``boot`` groups so the installed hooks are no-ops until
+    the admin lists members.
+    """
+    path = Path(path) if path is not None else Path(GROUP_PATH)
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"invalid YAML in {path}: {exc}")
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ConfigError(f"groups file must be a mapping: {path}")
+
+    groups = {}
+    for gname, members in data.items():
+        _validate_group_name(gname, path)
+        if not isinstance(members, list):
+            raise ConfigError(f"{path}: group {gname!r} must be a list")
+        parsed = []
+        for member in members:
+            parsed.append(_parse_group_member(member, path, gname))
+        groups[str(gname)] = parsed
+    return groups
+
+
+def _validate_group_name(name, path) -> None:
+    if not _is_safe_name(name):
+        raise ConfigError(
+            f"{path}: group name {name!r} is not allowed; {_NAME_HINT}"
+        )
+
+
+def _parse_group_member(member, path, group) -> tuple[str, str | None]:
+    """Parse one ``SUBVOL`` or ``SUBVOL:PROFILE`` group member."""
+    if not isinstance(member, str):
+        raise ConfigError(
+            f"{path}: group {group!r}: member must be a string: {member!r}"
+        )
+    text = member.strip()
+    if not text:
+        raise ConfigError(f"{path}: group {group!r}: empty member")
+
+    subvol, sep, profile = text.partition(":")
+    if not subvol:
+        raise ConfigError(f"{path}: group {group!r}: member {member!r} has no SUBVOL")
+    if sep and not profile:
+        raise ConfigError(
+            f"{path}: group {group!r}: member {member!r} has no PROFILE after ':'"
+        )
+    if not _is_safe_name(subvol):
+        raise ConfigError(
+            f"{path}: group {group!r}: invalid SUBVOL {subvol!r}; {_NAME_HINT}"
+        )
+    if sep and not _is_safe_name(profile):
+        raise ConfigError(
+            f"{path}: group {group!r}: invalid PROFILE {profile!r}; {_NAME_HINT}"
+        )
+    return (subvol, profile if sep else None)
 
 
 def _parse_profile(name, praw, auth, path) -> Profile:

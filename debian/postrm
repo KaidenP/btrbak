@@ -4,6 +4,7 @@ set -e
 case "$1" in
     remove|purge|disappear)
         if [ -d /run/systemd/system ]; then
+            deb-systemd-helper disable btrbak-snapshot-boot.service >/dev/null || true
             deb-systemd-helper disable btrbak.timer >/dev/null || true
         fi
         ;;

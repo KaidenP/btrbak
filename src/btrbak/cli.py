@@ -97,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("subvol", nargs="?")
     p_run.add_argument("profile", nargs="?")
+    p_run.add_argument("-g", "--group")
     p_run.add_argument("--force", action="store_true")
     p_run.add_argument("--force-config", action="store_true")
     p_run.add_argument("--full", action="store_true")
@@ -154,17 +155,100 @@ def _discover(subvol):
     return config_mod.discover_configs_tolerant(subvol)
 
 
+def _discover_group(group_name):
+    """Return ``(path, config, error)`` for every config named by a group.
+
+    Members are ``SUBVOL`` or ``SUBVOL:PROFILE``. Members that share a SUBVOL
+    are merged into one config selection; a bare ``SUBVOL`` member means all of
+    that config's profiles. Load failures are reported per member and do not
+    hide the rest of the group.
+    """
+    groups = config_mod.load_groups()
+    if group_name not in groups:
+        raise config_mod.ConfigError(f"unknown group: {group_name!r}")
+
+    # Map each subvol to ``None`` (all profiles) or a set of profile names.
+    by_subvol = {}
+    for subvol, profile in groups[group_name]:
+        if profile is None:
+            by_subvol[subvol] = None
+        else:
+            selected = by_subvol.setdefault(subvol, set())
+            if selected is not None:
+                selected.add(profile)
+
+    try:
+        auth = config_mod.load_auth()
+    except config_mod.ConfigError as exc:
+        auth, auth_error = {}, exc
+    else:
+        auth_error = None
+
+    results = []
+    for subvol, profile_names in by_subvol.items():
+        try:
+            path = config_mod.config_path_for_subvol(subvol)
+        except config_mod.ConfigError as exc:
+            results.append((subvol, None, exc))
+            continue
+        if auth_error is not None:
+            results.append((path, None, auth_error))
+            continue
+        try:
+            cfg = config_mod.load_config(path, auth)
+        except config_mod.ConfigError as exc:
+            results.append((path, None, exc))
+            continue
+        if profile_names is not None:
+            missing = sorted(name for name in profile_names if name not in cfg.profiles)
+            if missing:
+                results.append(
+                    (
+                        path,
+                        None,
+                        config_mod.ConfigError(
+                            f"group {group_name!r}: unknown profile(s) in "
+                            f"{cfg.name}: {', '.join(missing)}"
+                        ),
+                    )
+                )
+                continue
+            cfg = config_mod.select_profile_names(cfg, profile_names)
+        results.append((path, cfg, None))
+    return results
+
+
 def cmd_run(args) -> int:
+    group = getattr(args, "group", None)
+    if group and (args.subvol or args.profile):
+        raise config_mod.ConfigError(
+            "--group cannot be combined with SUBVOL or PROFILE"
+        )
+
     selected_configs = []
     config_errors = 0
-    for path, cfg, error in _discover(args.subvol):
+    if group:
+        discovered = _discover_group(group)
+        if not discovered:
+            print(
+                f"warning: group {group!r} is empty; nothing to do",
+                file=sys.stderr,
+            )
+            return 0
+    else:
+        discovered = _discover(args.subvol)
+
+    for path, cfg, error in discovered:
         if error is not None:
             print(f"config error: {error}", file=sys.stderr)
             config_errors += 1
             continue
-        selected = config_mod.select_profiles(cfg, args.profile)
-        if selected is None:
-            continue
+        if group:
+            selected = cfg
+        else:
+            selected = config_mod.select_profiles(cfg, args.profile)
+            if selected is None:
+                continue
         # The unfiltered profile names travel with the selection so a run can
         # tell an orphaned manifest profile apart from one merely filtered out
         # by PROFILE.
@@ -915,6 +999,12 @@ def cmd_config_check(args) -> int:
         return 2
 
     return_code = 0
+    known = {path.stem for path, _, _ in discovered}
+    loaded = {
+        cfg.name: cfg
+        for _, cfg, error in discovered
+        if error is None and cfg is not None
+    }
     for path, cfg, error in discovered:
         if error is not None:
             print(f"{path.stem}:")
@@ -934,6 +1024,27 @@ def cmd_config_check(args) -> int:
             # it, which reads like the report was truncated rather than like
             # everything passing.
             print("  ok")
+
+    try:
+        groups = config_mod.load_groups()
+    except config_mod.ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return_code = 2
+    else:
+        for gname, members in groups.items():
+            for subvol, profile in members:
+                if subvol not in known:
+                    print(f"groups/{gname}:")
+                    print(f"  error: no config file for subvol {subvol!r}")
+                    return_code = 2
+                elif subvol in loaded and profile is not None \
+                        and profile not in loaded[subvol].profiles:
+                    print(f"groups/{gname}:")
+                    print(
+                        f"  error: unknown profile {profile!r} in subvol "
+                        f"{subvol!r}"
+                    )
+                    return_code = 2
     return return_code
 
 

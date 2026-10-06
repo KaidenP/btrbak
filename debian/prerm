@@ -4,6 +4,7 @@ set -e
 case "$1" in
     remove|deconfigure)
         if [ -d /run/systemd/system ]; then
+            deb-systemd-invoke stop btrbak-snapshot-boot.service >/dev/null || true
             deb-systemd-invoke stop btrbak.timer >/dev/null || true
         fi
         ;;

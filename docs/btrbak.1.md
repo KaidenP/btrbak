@@ -57,6 +57,12 @@ snapshots for the named `SUBVOL` (optional), optionally limited to `PROFILE`
 (optional). When `SUBVOL` is omitted, every profile file is processed; when
 `PROFILE` is omitted, every profile in each file is processed.
 
+`-g, --group NAME`
+: Run the snapshot group `NAME` from `/etc/btrbak/groups.yaml` instead of a
+  `SUBVOL`/`PROFILE` selection. Members are `SUBVOL` or `SUBVOL:PROFILE`
+  entries; see **btrbak-profiles**(5). Cannot be combined with `SUBVOL` or
+  `PROFILE`. An empty group is a no-op and prints a warning.
+
 `--force`
 : Create a snapshot even when nothing is due.
 

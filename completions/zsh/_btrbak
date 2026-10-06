@@ -66,6 +66,35 @@ _btrbak_profiles() {
   _describe 'profile' profiles
 }
 
+_btrbak_groups() {
+  local -a groups
+  groups=(${(f)"$(/usr/bin/python3 - 2>/dev/null <<'PY'
+import os
+
+try:
+    import yaml
+except Exception:
+    raise SystemExit(0)
+
+path = "/etc/btrbak/groups.yaml"
+if not os.path.isfile(path):
+    raise SystemExit(0)
+
+try:
+    with open(path, encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+except Exception:
+    raise SystemExit(0)
+
+if isinstance(data, dict):
+    for name in sorted(data):
+        print(name)
+PY
+)"})
+  (( $#groups )) || return 1
+  _describe 'group' groups
+}
+
 _btrbak_snapshot_ids() {
   local dest
   dest=$(_btrbak_config_value "$1" dest)
@@ -96,6 +125,7 @@ _btrbak_run() {
     '--force-config[overwrite a differing remote config.yaml]' \
     '--full[force a full snapshot]' \
     '(-n --dry-run)'{-n,--dry-run}'[preview work without doing it]' \
+    '(-g --group)'{-g,--group}'[run a snapshot group]:group:->group' \
     $_btrbak_common_opts \
     '1:subvol:->subvol' \
     '2:profile:->profile' \
@@ -103,6 +133,7 @@ _btrbak_run() {
   case $state in
     subvol) _btrbak_subvols ;;
     profile) _btrbak_profiles "$line[1]" ;;
+    group) _btrbak_groups ;;
   esac
 }
 

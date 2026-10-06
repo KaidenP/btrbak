@@ -1,0 +1,17 @@
+[Unit]
+Description=Create a btrbak snapshot on boot
+Documentation=man:btrbak(1)
+# Skip cleanly until at least one profile exists.
+ConditionDirectoryNotEmpty=/etc/btrbak/profiles.d
+After=local-fs.target
+
+[Service]
+Type=oneshot
+# Snapshot the members of the `boot` group in /etc/btrbak/groups.yaml.
+# The group is empty by default, so this is a no-op until configured.
+ExecStart=/usr/bin/btrbak run --group boot --force
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

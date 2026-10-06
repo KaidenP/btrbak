@@ -295,6 +295,34 @@ Deeper checks run in `validate()`:
   recovery.
 - If `compression` is enabled: valid algorithm/level.
 
+### 6.5 Snapshot groups
+
+`/etc/btrbak/groups.yaml` names sets of `SUBVOL` or `SUBVOL:PROFILE` members so
+an event hook can snapshot several subvolumes without touching the rest:
+
+```
+apt:
+  - root
+  - var:weekly
+boot:
+  - root
+  - var
+```
+
+- Group names follow the same safe-name rule as profile names.
+- `SUBVOL` selects every profile in `<subvol>.yaml`; `SUBVOL:PROFILE` selects a
+  single profile. A bare `SUBVOL` member always means all of its profiles, even
+  if other members name individual profiles in the same file.
+- `btrbak run --group NAME` runs the group. It is mutually exclusive with
+  `SUBVOL`/`PROFILE`. An empty group is a no-op: `run` prints a warning and
+  exits `0`, so the shipped `apt`/`boot` hooks are inert until members are added.
+- `config check` validates that every member references an existing config stem
+  and, when qualified, an existing profile.
+- The Debian package installs `apt: []` and `boot: []` and enables two hooks:
+  `btrbak-snapshot-boot.service` (`run --group boot --force` on boot) and
+  `/etc/apt/apt.conf.d/80btrbak` (`run --group apt --force` before package
+  operations).
+
 ---
 
 ## 7. Layouts
@@ -756,7 +784,7 @@ on failure.
 
 ```
 btrbak config check
-btrbak run [SUBVOL] [PROFILE] [--force] [--force-config] [--full] [--dry-run]
+btrbak run [SUBVOL] [PROFILE] [--group GROUP] [--force] [--force-config] [--full] [--dry-run]
 btrbak verify [SUBVOL] [PROFILE]
 btrbak list [SUBVOL] [PROFILE]
 btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
@@ -796,6 +824,10 @@ btrbak forget SUBVOL PROFILE SNAPSHOT_ID
   under the file's stem; `run`, `list` and `verify` print it to stderr and exit
   `2` once the other configs are done.
 - `--force-config` allows overwriting a differing remote `config.yaml` (§9).
+- `--group GROUP` runs the snapshot group `GROUP` from
+  `/etc/btrbak/groups.yaml` (§6.5) instead of a `SUBVOL`/`PROFILE` selection.
+  It cannot be combined with `SUBVOL` or `PROFILE`. An empty group prints a
+  warning and exits `0`; missing members/configs are config errors.
 - `--full` forces a full (parentless) backup and implies `--force`. For
   local-only profiles it has no effect (use `--force` to trigger a manual
   local snapshot).

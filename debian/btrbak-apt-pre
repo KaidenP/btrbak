@@ -1,0 +1,21 @@
+#!/bin/sh
+# btrbak-apt-pre — snapshot the `apt` group before an apt/dpkg transaction.
+#
+# apt may invoke dpkg several times in a single transaction; the marker file
+# keeps that from producing one snapshot per dpkg invocation.
+
+set -eu
+
+MARKER=/var/tmp/btrbak-apt-pre.stamp
+TTL_SECONDS=600
+
+now=$(date +%s)
+if [ -f "$MARKER" ]; then
+    mtime=$(stat -c %Y "$MARKER" 2>/dev/null || echo 0)
+    if [ $((now - mtime)) -lt "$TTL_SECONDS" ]; then
+        exit 0
+    fi
+fi
+
+touch "$MARKER"
+exec /usr/bin/btrbak run --group apt --force

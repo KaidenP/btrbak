@@ -105,6 +105,31 @@ _btrbak_profiles() {
     _btrbak_config_value "$1" profiles
 }
 
+_btrbak_groups() {
+    /usr/bin/python3 - 2>/dev/null <<'PY'
+import os
+
+try:
+    import yaml
+except Exception:
+    raise SystemExit(0)
+
+path = "/etc/btrbak/groups.yaml"
+if not os.path.isfile(path):
+    raise SystemExit(0)
+
+try:
+    with open(path, encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+except Exception:
+    raise SystemExit(0)
+
+if isinstance(data, dict):
+    for name in sorted(data):
+        print(name)
+PY
+}
+
 _btrbak_snapshot_ids() {
     local subvol=$1 profile=$2 dest
     dest=$(_btrbak_config_value "$subvol" dest) || return
@@ -136,8 +161,19 @@ _btrbak() {
 
     case $cmd in
         run)
-            if [[ $cur == -* ]]; then
-                COMPREPLY=($(compgen -W '--force --force-config --full -n --dry-run -v --verbose -h --help' -- "$cur"))
+            if [[ $prev == -g || $prev == --group ]]; then
+                COMPREPLY=($(compgen -W "$(_btrbak_groups)" -- "$cur"))
+                return
+            fi
+            local has_group= i
+            for ((i = 1; i < cword; i++)); do
+                if [[ ${words[i]} == -g || ${words[i]} == --group ]]; then
+                    has_group=1
+                    break
+                fi
+            done
+            if [[ -n $has_group || $cur == -* ]]; then
+                COMPREPLY=($(compgen -W '-g --group --force --force-config --full -n --dry-run -v --verbose -h --help' -- "$cur"))
             else
                 case $pos in
                     0) COMPREPLY=($(compgen -W "$(_btrbak_subvols)" -- "$cur")) ;;

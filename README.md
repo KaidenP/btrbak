@@ -21,13 +21,13 @@ artifact, then install it with apt so the dependencies are resolved
 automatically:
 
 ```
-sudo apt-get install ./btrbak_1.0.1-1_all.deb
+sudo apt-get install ./btrbak_1.0.2-1_all.deb
 ```
 
 Or, if you already have `python3`, `python3-yaml`, and `btrfs-progs` installed:
 
 ```
-sudo dpkg -i btrbak_1.0.1-1_all.deb
+sudo dpkg -i btrbak_1.0.2-1_all.deb
 ```
 
 The package installs:
@@ -208,7 +208,7 @@ Build a binary `.deb` without needing debhelper or dh-python:
 ./debian/build-deb.sh
 ```
 
-The script produces `dist/btrbak_1.0.1-1_all.deb`. It installs:
+The script produces `dist/btrbak_1.0.2-1_all.deb`. It installs:
 
 - `/usr/bin/btrbak`
 - the `btrbak` package into `/usr/lib/python3/dist-packages/btrbak`
@@ -236,8 +236,7 @@ The package installs example configuration under
 
 - `profiles.d/example.yaml` — a sample source-subvolume profile file
 - `auth.yaml` — a sample remote-credentials file
-
-Copy and edit these into `/etc/btrbak/` before running.
+- `scripts/btrbak-snapshot-now` — immediate on-demand snapshot
 
 A systemd timer is installed and enabled by default:
 
@@ -254,6 +253,41 @@ until you add at least one profile. Disable or re-enable it with:
 sudo systemctl disable --now btrbak.timer
 sudo systemctl enable --now btrbak.timer
 ```
+
+### Snapshot groups
+
+Groups are defined in `/etc/btrbak/groups.yaml`:
+
+```
+apt:
+  - root
+  - var
+boot:
+  - root
+  - var
+  - home
+```
+
+Each member is a `SUBVOL` (the stem of a file in `/etc/btrbak/profiles.d`) or
+`SUBVOL:PROFILE`. The package installs `apt` and `boot` groups that are empty
+by default, so the event hooks below are no-ops until you add members.
+
+### Event-driven snapshots
+
+Two event hooks are installed and enabled by default:
+
+- `btrbak-snapshot-boot.service` — runs `btrbak run --group boot --force` on boot
+- `/etc/apt/apt.conf.d/80btrbak` — runs `btrbak run --group apt --force` before
+  package installs/upgrades
+
+Check them with:
+
+```
+systemctl status btrbak-snapshot-boot.service
+```
+
+For a manual one-off snapshot, use `scripts/btrbak-snapshot-now` (or
+`sudo btrbak run --force`).
 
 ## Development
 

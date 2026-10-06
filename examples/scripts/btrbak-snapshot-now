@@ -1,0 +1,12 @@
+#!/bin/sh
+# btrbak-snapshot-now — take an immediate btrbak snapshot.
+#
+# Usage:
+#   sudo btrbak-snapshot-now [SUBVOL] [PROFILE]
+#
+# With no arguments this forces a snapshot for every configured profile.
+# With SUBVOL and/or PROFILE the snapshot is scoped accordingly.
+
+set -eu
+
+exec /usr/bin/btrbak run "$@" --force

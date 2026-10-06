@@ -755,3 +755,34 @@ def test_validate_warns_auth_permissions_only_when_auth_is_used(tmp_path, monkey
     )
     _errors, warnings = config.validate(cfg, check_remotes=False)
     assert any("auth.yaml" in warning and "0600" in warning for warning in warnings)
+
+
+def test_load_groups_missing_file_is_empty(tmp_path):
+    assert config.load_groups(tmp_path / "missing.yaml") == {}
+
+
+def test_load_groups_parses_members(tmp_path):
+    path = tmp_path / "groups.yaml"
+    _write(path, {"apt": ["root", "var:weekly"], "boot": []})
+    assert config.load_groups(path) == {
+        "apt": [("root", None), ("var", "weekly")],
+        "boot": [],
+    }
+
+
+def test_load_groups_rejects_non_list_member(tmp_path):
+    path = tmp_path / "groups.yaml"
+    _write(path, {"apt": "root"})
+    with pytest.raises(config.ConfigError):
+        config.load_groups(path)
+
+
+def test_load_groups_rejects_bad_names(tmp_path):
+    path = tmp_path / "groups.yaml"
+    _write(path, {"bad/group": ["root"]})
+    with pytest.raises(config.ConfigError):
+        config.load_groups(path)
+
+    _write(path, {"apt": ["root:bad/profile"]})
+    with pytest.raises(config.ConfigError):
+        config.load_groups(path)
