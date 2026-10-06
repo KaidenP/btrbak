@@ -484,7 +484,9 @@ Per config file:
    - remote has no `config.yaml` → upload it;
    - remote `config.yaml` identical to local → skip;
    - remote `config.yaml` differs → **error** (exit `1`) unless `--force-config`,
-     in which case overwrite.
+     in which case overwrite. The error names the usual cause: one remote
+     root shared between two different config files (§16 tracks namespacing
+     the remote layout as future work).
    `auth.yaml` is never uploaded.
 5. For each selected profile, run the profile pipeline (§9.1).
 6. Run pruning (§9.2).
@@ -544,6 +546,11 @@ local snapshot.
 Retry behavior: a snapshot whose uploads are not all `complete` is retried on
 subsequent runs (re-send + re-upload). It is never pruned while incomplete.
 Local-only snapshots have no uploads and are committed immediately.
+
+The one state a retry can never fix is a snapshot whose **local subvolume is
+gone** while its uploads never all completed: there is nothing left to re-send,
+so every run would retry and exit `1` forever. `btrbak forget` (§12) is the
+escape hatch for it, and the retry warning names the exact command.
 
 ### 9.2 Pruning (dependency-preserving retention)
 
@@ -753,6 +760,7 @@ btrbak run [SUBVOL] [PROFILE] [--force] [--force-config] [--full] [--dry-run]
 btrbak verify [SUBVOL] [PROFILE]
 btrbak list [SUBVOL] [PROFILE]
 btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
+btrbak forget SUBVOL PROFILE SNAPSHOT_ID
 ```
 
 - Global: `--verbose/-v`, repeatable. Accepted either before or after the
@@ -847,6 +855,16 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 - Exit codes: `0` success; `1` runtime error (including a differing remote
   `config.yaml` that is not overwritten); `2` config/validation error; `130`
   interrupted (Ctrl-C), reported as a one-liner rather than a traceback.
+- `forget` removes a snapshot entry the pipeline can no longer make progress
+  on — the stuck-retry state from §9.1 (local subvolume gone, uploads never
+  all `complete`). It is refused when the local subvolume still exists (that
+  is live backup data: delete it deliberately or let prune manage it) and
+  when another snapshot lists the entry as `parent` (forgetting it would
+  break that chain). Any remote object recorded for the entry is deleted
+  best-effort first — a partial upload, or the object a `local_deleted` entry
+  was waiting to have deleted — then the entry is removed from `meta.yaml`,
+  which is saved and pushed like any other manifest change. It requires the
+  local manifest (the source of truth) and holds the `dest` lock.
 - Logging to stderr (levels via `-v`); never log secrets or auth values, and
   subprocess error messages include only the program name (plus stderr), never
   command arguments.
@@ -874,7 +892,19 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   disaster-recovery restores work when `dest` is absent or read-only. Both
   stage their downloads in a scratch directory under `tmpdir` and remove it
   again when it is left empty, so repeated invocations do not accumulate
-  directories.
+  directories. The `run` lock is taken non-blockingly (a timer-driven run
+  should skip rather than queue), while `verify`, `restore` and `forget` wait
+  up to 30 s: the only routine holder of the tmpdir lock is a `run` doing its
+  brief staging sweep, and that moment must not fail a verify outright.
+- Everything btrbak stages under `tmpdir` is private: directories it creates
+  are `0700` and files it creates are `0600` (explicit `os.open` modes, not
+  the default `0644` under umask). A staged send stream is an entire
+  filesystem, and a restore's `.dec` intermediate is **decrypted plaintext**
+  even for an encrypted profile, so neither may be world-readable in
+  `/var/tmp` at any point. `age` creates its `-o` output under the process
+  umask, so the umask is tightened to `0077` for the duration of each `age`
+  invocation and restored afterwards. Downloads from a `dir` remote are
+  created `0600` as well.
 - Those scratch directories are named `.verify` and `.restore`, not `verify` and
   `restore`. Per-profile staging directories are named after the profile, and
   `restore`/`verify` are perfectly legal profile names — the leading dot makes

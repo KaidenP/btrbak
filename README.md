@@ -14,6 +14,7 @@ btrbak run [SUBVOL] [PROFILE] [--force] [--force-config] [--full] [--dry-run]
 btrbak verify [SUBVOL] [PROFILE]
 btrbak list [SUBVOL] [PROFILE]
 btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
+btrbak forget SUBVOL PROFILE SNAPSHOT_ID
 ```
 
 ## Configuration
@@ -75,6 +76,28 @@ target: the links already received are detected and skipped, so the chain
 resumes instead of failing with `File exists`. Detection is by subvolume UUID,
 not name alone, so an unrelated subvolume sitting at a snapshot id is rejected
 instead of silently treated as part of the chain.
+
+## Forgetting a stuck snapshot
+
+```
+sudo btrbak forget SUBVOL PROFILE SNAPSHOT_ID
+```
+
+A snapshot whose local subvolume is gone while its uploads never all completed
+cannot be re-sent, so every `run` retries it and exits 1 forever; the retry
+warning names the exact `forget` command. `forget` drops the entry from
+`meta.yaml` (and best-effort deletes any partial remote object, which also
+finishes a stuck `local_deleted` remote-delete retry). It refuses to touch an
+entry whose local subvolume still exists, or one that other snapshots depend
+on as their parent.
+
+## Staging privacy
+
+Everything btrbak stages under `tmpdir` (send streams, decrypted restore
+intermediates, verify downloads) is created `0600` inside `0700` directories —
+a staged stream is an entire filesystem, and a restore's decrypted intermediate
+is plaintext even for an encrypted profile, so none of it is ever
+world-readable in `/var/tmp`.
 
 ## Exit codes
 
