@@ -118,6 +118,35 @@ uploaded, so a remote object that rots or is tampered with is only ever caught
 by `verify` — and is never repaired by `run`. Run `verify` on a schedule
 alongside `run`; without it, silent offsite corruption goes unnoticed.
 
+## Packaging
+
+Build a binary `.deb` without needing debhelper or dh-python:
+
+```
+./debian/build-deb.sh
+```
+
+The script produces `dist/btrbak_0.1.0-1_all.deb`. It installs:
+
+- `/usr/bin/btrbak`
+- the `btrbak` package into `/usr/lib/python3/dist-packages/btrbak`
+- `btrbak(1)` and `btrbak-profiles(5)` manpages
+- bash completion at `/usr/share/bash-completion/completions/btrbak`
+- zsh completion at `/usr/share/zsh/vendor-completions/_btrbak`
+- an empty `/etc/btrbak/profiles.d/` configuration directory
+
+The package depends on `python3`, `python3-yaml`, and `btrfs-progs`, and
+recommends `age` for encrypted backups.
+
+Man pages are generated at build time with `pandoc` (install it with
+`sudo apt-get install pandoc`) from the committed Markdown source in
+`docs/btrbak.1.md` and `docs/btrbak-profiles.5.md`, so the Markdown
+documentation and the installed man pages share a single source.
+Completion sources live in `completions/`.
+
+A GitHub Actions workflow (`.github/workflows/build-deb.yml`) builds the
+`.deb` on every push and pull request and uploads it as a build artifact.
+
 ## Development
 
 Install the project in editable mode to expose the `btrbak` command:

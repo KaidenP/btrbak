@@ -1,0 +1,8 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: btrbak
+Upstream-Contact: Kaiden <11036039+KaidenP@users.noreply.github.com>
+
+Files: *
+Copyright: 2025 Kaiden <11036039+KaidenP@users.noreply.github.com>
+License: Proprietary
+ All rights reserved.

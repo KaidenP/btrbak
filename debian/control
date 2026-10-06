@@ -1,0 +1,16 @@
+Package: btrbak
+Version: @VERSION@
+Section: admin
+Priority: optional
+Architecture: all
+Installed-Size: @INSTALLED_SIZE@
+Depends: python3 (>= 3.10), python3-yaml (>= 6), btrfs-progs
+Recommends: age
+Maintainer: Kaiden <11036039+KaidenP@users.noreply.github.com>
+Description: btrfs snapshot and offsite backup utility
+ btrbak creates read-only btrfs snapshots, ships incremental offsite
+ backups with btrfs send, verifies remote objects against a local
+ manifest, and prunes expired snapshots.
+ .
+ Configuration lives in /etc/btrbak/profiles.d; see btrbak-profiles(5)
+ for the file format.

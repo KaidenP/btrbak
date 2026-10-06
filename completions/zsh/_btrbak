@@ -1,0 +1,192 @@
+#compdef btrbak
+#
+# zsh completion for btrbak(1)
+#
+# Installed as /usr/share/zsh/vendor-completions/_btrbak so zsh picks it up
+# automatically from its default fpath.
+
+_btrbak_common_opts=(
+  '(-v --verbose)'{-v,--verbose}'[increase verbosity]'
+  '(-h --help)'{-h,--help}'[show help]'
+)
+
+# Print one value per line from a profile file.  $1 is the SUBVOL, $2 is one
+# of: profiles, dest.  Uses PyYAML (a btrbak dependency); silently returns
+# nothing when it is unavailable.
+_btrbak_config_value() {
+  /usr/bin/python3 - "$1" "$2" 2>/dev/null <<'PY'
+import os
+import sys
+
+try:
+    import yaml
+except Exception:
+    sys.exit(0)
+
+subvol, mode = sys.argv[1], sys.argv[2]
+base = "/etc/btrbak/profiles.d"
+path = None
+for ext in (".yaml", ".yml"):
+    candidate = os.path.join(base, subvol + ext)
+    if os.path.isfile(candidate):
+        path = candidate
+        break
+if path is None:
+    sys.exit(0)
+
+try:
+    with open(path, encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+except Exception:
+    sys.exit(0)
+
+if mode == "profiles":
+    profiles = data.get("profiles") or {}
+    for name in sorted(profiles):
+        print(name)
+elif mode == "dest":
+    dest = data.get("dest")
+    if dest:
+        print(os.path.expanduser(str(dest)))
+PY
+}
+
+_btrbak_subvols() {
+  local -a names
+  names=( /etc/btrbak/profiles.d/*.yaml(N) /etc/btrbak/profiles.d/*.yml(N) )
+  (( $#names )) || return 1
+  names=(${(u)${names:t:r}})
+  _describe 'subvol' names
+}
+
+_btrbak_profiles() {
+  local -a profiles
+  profiles=(${(f)"$(_btrbak_config_value "$1" profiles)"})
+  (( $#profiles )) || return 1
+  _describe 'profile' profiles
+}
+
+_btrbak_snapshot_ids() {
+  local dest
+  dest=$(_btrbak_config_value "$1" dest)
+  [[ -n $dest && -d $dest/$2 ]] || return 1
+  local -a ids
+  ids=( $dest/$2/*(N/:t) )
+  (( $#ids )) || return 1
+  _describe 'snapshot id' ids
+}
+
+_btrbak_config() {
+  local context state line
+  typeset -A opt_args
+  _arguments -C \
+    $_btrbak_common_opts \
+    '1:config command:->ccmd' \
+    && return
+  case $state in
+    ccmd) _values 'config command' 'check[validate configuration]' ;;
+  esac
+}
+
+_btrbak_run() {
+  local context state line
+  typeset -A opt_args
+  _arguments -C \
+    '--force[create a snapshot even when nothing is due]' \
+    '--force-config[overwrite a differing remote config.yaml]' \
+    '--full[force a full snapshot]' \
+    '(-n --dry-run)'{-n,--dry-run}'[preview work without doing it]' \
+    $_btrbak_common_opts \
+    '1:subvol:->subvol' \
+    '2:profile:->profile' \
+    && return
+  case $state in
+    subvol) _btrbak_subvols ;;
+    profile) _btrbak_profiles "$line[1]" ;;
+  esac
+}
+
+_btrbak_verify() {
+  local context state line
+  typeset -A opt_args
+  _arguments -C \
+    $_btrbak_common_opts \
+    '1:subvol:->subvol' \
+    '2:profile:->profile' \
+    && return
+  case $state in
+    subvol) _btrbak_subvols ;;
+    profile) _btrbak_profiles "$line[1]" ;;
+  esac
+}
+
+_btrbak_list() {
+  _btrbak_verify
+}
+
+_btrbak_restore() {
+  local context state line
+  typeset -A opt_args
+  _arguments -C \
+    $_btrbak_common_opts \
+    '1:subvol:->subvol' \
+    '2:profile:->profile' \
+    '3:snapshot id:->snapshot' \
+    '4:target:_files' \
+    && return
+  case $state in
+    subvol) _btrbak_subvols ;;
+    profile) _btrbak_profiles "$line[1]" ;;
+    snapshot) _btrbak_snapshot_ids "$line[1]" "$line[2]" ;;
+  esac
+}
+
+_btrbak_forget() {
+  local context state line
+  typeset -A opt_args
+  _arguments -C \
+    $_btrbak_common_opts \
+    '1:subvol:->subvol' \
+    '2:profile:->profile' \
+    '3:snapshot id:->snapshot' \
+    && return
+  case $state in
+    subvol) _btrbak_subvols ;;
+    profile) _btrbak_profiles "$line[1]" ;;
+    snapshot) _btrbak_snapshot_ids "$line[1]" "$line[2]" ;;
+  esac
+}
+
+_btrbak() {
+  local context state line curcontext="$curcontext"
+  typeset -A opt_args
+  _arguments -C \
+    $_btrbak_common_opts \
+    '1:command:->command' \
+    '*::arg:->args' \
+    && return
+
+  case $state in
+    command)
+      _values 'command' \
+        'config[validate configuration]' \
+        'run[create due snapshots/backups and prune]' \
+        'verify[check remote files against the manifest]' \
+        'list[list snapshots and backups]' \
+        'restore[restore a snapshot chain]' \
+        'forget[drop a stuck snapshot entry]'
+      ;;
+    args)
+      case $line[1] in
+        config) _btrbak_config ;;
+        run) _btrbak_run ;;
+        verify) _btrbak_verify ;;
+        list) _btrbak_list ;;
+        restore) _btrbak_restore ;;
+        forget) _btrbak_forget ;;
+      esac
+      ;;
+  esac
+}
+
+_btrbak "$@"
