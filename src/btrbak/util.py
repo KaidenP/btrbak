@@ -7,6 +7,7 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -34,25 +35,45 @@ VERIFY_SCRATCH = ".verify"
 RESTORE_SCRATCH = ".restore"
 
 
+#: stderr lines to embed in a failure message. ``btrfs send``/``receive``
+#: stream progress to stderr; echoing it all would bloat the exception with
+#: megabytes of progress lines.
+_MAX_STDERR_LINES = 20
+
+
 def run(cmd, stdout=None, stdin=None, check=True) -> subprocess.CompletedProcess:
     """Run a command, returning the CompletedProcess.
 
     By default stdout/stderr are captured and a non-zero exit raises
-    :class:`BtrbakError`. Pass ``stdout=file`` to stream stdout to a file.
-    A missing executable also raises :class:`BtrbakError`.
+    :class:`BtrbakError`. Pass ``stdout=file`` to stream stdout to a file; when
+    stdout is a real file, stderr is inherited so progress streams live rather
+    than being buffered. A missing or non-executable program also raises
+    :class:`BtrbakError`.
     """
+    if not cmd:
+        raise BtrbakError("cannot run an empty command")
+    stream = stdout is not None and stdout is not subprocess.PIPE
     try:
         proc = subprocess.run(
             cmd,
             stdout=stdout if stdout is not None else subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=None if stream else subprocess.PIPE,
             stdin=stdin,
         )
     except FileNotFoundError as exc:
         raise BtrbakError(f"required command not found: {cmd[0]}") from exc
+    except OSError as exc:
+        raise BtrbakError(f"cannot execute {cmd[0]}: {exc}") from exc
     if check and proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", "replace") if proc.stderr else ""
-        raise BtrbakError(f"command failed ({proc.returncode}): {cmd[0]}\n{stderr}")
+        detail = ""
+        if proc.stderr:
+            lines = proc.stderr.decode("utf-8", "replace").splitlines()
+            if len(lines) > _MAX_STDERR_LINES:
+                detail = "\n" + "\n".join(lines[-_MAX_STDERR_LINES:])
+                detail += f"\n... ({len(lines) - _MAX_STDERR_LINES} more stderr lines)"
+            else:
+                detail = "\n" + "\n".join(lines)
+        raise BtrbakError(f"command failed ({proc.returncode}): {cmd[0]}{detail}")
     return proc
 
 
@@ -98,6 +119,8 @@ def exclusive_lock(path, timeout=None):
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
+            except InterruptedError:
+                continue  # EINTR from a signal; retry immediately
             except BlockingIOError:
                 if deadline is None:
                     raise BtrbakError(f"lock is held by another process: {path}")
@@ -121,11 +144,15 @@ def optional_lock(path):
     """
     fd = _open_lock(path)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-            return
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except InterruptedError:
+                continue
+            except BlockingIOError:
+                yield False
+                return
         yield True
     finally:
         os.close(fd)
@@ -139,20 +166,67 @@ def private_dir(path) -> Path:
     directory btrbak creates for them must be off-limits to other local
     users. ``mkdir(mode=...)`` is not enough: the mode is masked by the
     process umask and only applies to the final component, so each created
-    level is chmod'ed explicitly. Existing directories are left untouched.
+    level is chmod'ed explicitly and symlinks are never followed.
+
+    Pre-existing components are verified to be real directories owned by the
+    invoking user (``/var/tmp`` is sticky 1777, so an unprivileged user can
+    pre-create ``/var/tmp/btrbak`` before btrbak's first run); a component
+    that is a symlink, not a directory, or owned by someone else raises
+    :class:`BtrbakError` rather than staging data through or into it.
     """
     path = Path(path)
     missing = []
     cursor = path
-    while not cursor.exists():
+    # lexists (lstat) rather than exists (stat): a dangling symlink must be
+    # treated as "present" and rejected, not as "missing" (which would then
+    # fail inside mkdir with a confusing FileExistsError).
+    while not os.path.lexists(cursor):
         missing.append(cursor)
         if cursor == cursor.parent:
             break
         cursor = cursor.parent
+
+    # The nearest existing ancestor is the staging boundary; it must be a real
+    # directory, not a planted symlink.
+    if not _is_real_dir(cursor):
+        raise BtrbakError(f"refusing to stage under a non-directory: {cursor}")
+
     for directory in reversed(missing):
-        directory.mkdir(exist_ok=True)
-        os.chmod(directory, 0o700)
+        try:
+            os.mkdir(directory)
+        except FileExistsError:
+            pass  # lost a race with a concurrent creator; verified below
+        _ensure_private_dir(directory)
+    if not missing:
+        _ensure_private_dir(path)
     return path
+
+
+def _is_real_dir(path) -> bool:
+    """Return True when *path* is an existing directory (not a symlink)."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _ensure_private_dir(directory) -> None:
+    """Verify *directory* is a private directory owned by the current user.
+
+    Refuses symlinks/non-directories and anything owned by another uid;
+    tightens the mode to 0700 (without following symlinks) when we own it but
+    it is more permissive.
+    """
+    st = os.lstat(directory)
+    if not stat.S_ISDIR(st.st_mode):
+        raise BtrbakError(f"refusing to use {directory}: not a directory")
+    if st.st_uid != os.geteuid():
+        raise BtrbakError(
+            f"refusing to use {directory}: owned by uid {st.st_uid} "
+            f"(expected {os.geteuid()})"
+        )
+    if st.st_mode & 0o777 != 0o700:
+        os.chmod(directory, 0o700, follow_symlinks=False)
 
 
 def open_private(path, mode="wb"):
@@ -161,9 +235,12 @@ def open_private(path, mode="wb"):
     A plain ``open(path, "wb")`` creates the file ``0644`` under the default
     umask, which would leave staged send streams -- entire filesystems,
     possibly neither compressed nor encrypted -- world-readable in ``/var/tmp``
-    for the lifetime of an upload.
+    for the lifetime of an upload. ``O_NOFOLLOW`` refuses a symlink planted at
+    the file path (which ``O_TRUNC`` would otherwise truncate), and ``fchmod``
+    fixes the mode without being masked by the umask.
     """
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    os.fchmod(fd, 0o600)
     return os.fdopen(fd, mode)
 
 
@@ -206,8 +283,8 @@ def prune_empty_dir(path, root=None) -> None:
     does every parent below the one that did not empty. When *root* is not an
     ancestor of *path*, only *path* itself is removed.
     """
-    path = Path(path)
-    root = Path(root) if root is not None else path.parent
+    path = Path(os.path.normpath(path))
+    root = Path(os.path.normpath(root)) if root is not None else path.parent
     bounded = path.is_relative_to(root)
     while path != root:
         rmdir_quiet(path)
@@ -220,24 +297,38 @@ def _open_lock(path) -> int:
     """Open (creating if needed) *path* for flock and return the descriptor."""
     path = Path(path)
     private_dir(path.parent)
-    return os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise BtrbakError(f"cannot open lock file {path}: {exc}") from exc
+    os.fchmod(fd, 0o600)
+    return fd
 
 
 def atomic_write_text(path, text: str) -> None:
     """Atomically write *text* to *path* (temp file + fsync + rename)."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    parent = path.parent
+    existed = parent.is_dir()
+    parent.mkdir(parents=True, exist_ok=True)
+    if not existed:
+        # A freshly created metadata directory is 0700 so it isn't
+        # world-listable; a pre-existing directory is left as the admin made
+        # it (the file itself is written 0600 by mkstemp's default mode).
+        os.chmod(parent, 0o700, follow_symlinks=False)
+    fd, tmp = tempfile.mkstemp(dir=str(parent), prefix=path.name + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
-        _fsync_dir(path.parent)
+        _fsync_dir(parent)
     finally:
-        if os.path.exists(tmp):
+        try:
             os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
 def _fsync_dir(path: Path) -> None:
@@ -298,6 +389,11 @@ def _mount_point(path: Path) -> Path:
                 if len(parts) < 2:
                     continue
                 mount = Path(_unescape_mounts(parts[1]))
+                # NOTE: mount paths are compared unresolved against the already
+                # resolved *path*; the kernel escapes whitespace but does not
+                # canonicalize symlinks, so a mount path that is itself a
+                # symlink may be missed. If /proc is unreadable we fall back to
+                # returning *path* (which btrfs_fsid treats as "no fsid").
                 if path == mount or mount in path.parents:
                     if best is None or len(mount.parts) > len(best.parts):
                         best = mount
@@ -350,8 +446,8 @@ def is_subvolume(path) -> bool:
     return _subvolume_show(path) is not None
 
 
-_OWN_UUID_RE = re.compile(r"^\s*UUID:\s*(\S+)", re.MULTILINE)
-_RECEIVED_UUID_RE = re.compile(r"^\s*Received UUID:\s*(\S+)", re.MULTILINE)
+_OWN_UUID_RE = re.compile(r"^\s*UUID:\s*(\S+)", re.MULTILINE | re.IGNORECASE)
+_RECEIVED_UUID_RE = re.compile(r"^\s*Received UUID:\s*(\S+)", re.MULTILINE | re.IGNORECASE)
 
 
 def subvolume_uuid(path) -> str | None:

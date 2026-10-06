@@ -14,6 +14,23 @@ def test_run_missing_binary_raises_btrbak_error(monkeypatch):
         util.run(["btrfs", "subvolume", "show", "/x"])
 
 
+def test_run_nonzero_exit_raises_btrbak_error(monkeypatch):
+    """The non-zero-exit branch is the universal subprocess error path."""
+    completed = subprocess.CompletedProcess(
+        args=["btrfs", "subvolume", "delete", "/x"],
+        returncode=1,
+        stdout=b"",
+        stderr=b"ERROR: cannot delete\n",
+    )
+    monkeypatch.setattr(util.subprocess, "run", lambda *a, **k: completed)
+    with pytest.raises(util.BtrbakError) as excinfo:
+        util.run(["btrfs", "subvolume", "delete", "/x"])
+    message = str(excinfo.value)
+    assert "command failed (1)" in message
+    assert "btrfs" in message
+    assert "ERROR: cannot delete" in message
+
+
 def test_is_subvolume_missing_binary_returns_false(monkeypatch):
     def fake_run(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory: btrfs")
