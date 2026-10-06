@@ -56,6 +56,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${{ github.ref_name }}"
-          gh release view "$tag" >/dev/null 2>&1 || \
-            gh release create "$tag" --title "$tag" --generate-notes
-          gh release upload "$tag" artifact/*.deb --clobber
+          repo="${{ github.repository }}"
+          gh release view "$tag" --repo "$repo" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "$tag" --generate-notes --repo "$repo"
+          gh release upload "$tag" artifact/*.deb --clobber --repo "$repo"
