@@ -186,3 +186,122 @@ def test_created_tolerates_bad_values():
     assert manifest.created({"created": "nope"}) == 0
     assert manifest.created({"created": None}) == 0
     assert manifest.created({"created": True}) == 0
+
+
+# --- per-snapshot codec validation -----------------------------------------
+#
+# meta.yaml is untrusted input: on the disaster-recovery path it is downloaded
+# from a remote. These codecs are fed straight back into send.py, which indexes
+# them with .get(), so a scalar where a mapping belongs used to escape as an
+# AttributeError traceback instead of a clean error (§8.1).
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["xz", ["xz"], 3, True],
+)
+def test_load_rejects_non_mapping_compression(tmp_path, value):
+    path = _write_meta(tmp_path, [{"id": "a", "compression": value}])
+    with pytest.raises(manifest.BtrbakError, match="'compression' must be a mapping"):
+        manifest.load(path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["age", ["age"], 7],
+)
+def test_load_rejects_non_mapping_encryption(tmp_path, value):
+    path = _write_meta(tmp_path, [{"id": "a", "encryption": value}])
+    with pytest.raises(manifest.BtrbakError, match="'encryption' must be a mapping"):
+        manifest.load(path)
+
+
+def test_load_accepts_null_codecs(tmp_path):
+    """A local-only snapshot, and any pre-codec manifest, records null."""
+    path = _write_meta(
+        tmp_path,
+        [{"id": "a", "compression": None, "encryption": None}],
+    )
+    meta = manifest.load(path)
+    snap = manifest.get_snapshot(meta, "p", "a")
+    assert snap["compression"] is None and snap["encryption"] is None
+
+
+def test_load_accepts_well_formed_codecs(tmp_path):
+    path = _write_meta(
+        tmp_path,
+        [
+            {
+                "id": "a",
+                "compression": {"algorithm": "xz", "level": 3},
+                "encryption": {
+                    "algorithm": "age",
+                    "recipients": ["age1abc"],
+                    "identity": "/key",
+                },
+            }
+        ],
+    )
+    snap = manifest.get_snapshot(manifest.load(path), "p", "a")
+    assert snap["compression"]["level"] == 3
+    assert snap["encryption"]["recipients"] == ["age1abc"]
+
+
+def test_load_accepts_a_quoted_compression_level(tmp_path):
+    """A hand-written manifest may quote the level; send coerces it."""
+    path = _write_meta(
+        tmp_path, [{"id": "a", "compression": {"algorithm": "xz", "level": "3"}}]
+    )
+    snap = manifest.get_snapshot(manifest.load(path), "p", "a")
+    assert snap["compression"]["level"] == "3"
+
+
+def test_load_rejects_unparseable_compression_level(tmp_path):
+    """int() would raise ValueError from inside send; reject it up front."""
+    path = _write_meta(
+        tmp_path, [{"id": "a", "compression": {"algorithm": "xz", "level": "six"}}]
+    )
+    with pytest.raises(manifest.BtrbakError, match="'compression.level' must be an integer"):
+        manifest.load(path)
+
+
+def test_load_rejects_codec_without_algorithm(tmp_path):
+    path = _write_meta(tmp_path, [{"id": "a", "compression": {"level": 3}}])
+    with pytest.raises(manifest.BtrbakError, match="non-empty string 'algorithm'"):
+        manifest.load(path)
+
+
+def test_load_rejects_non_list_recipients(tmp_path):
+    """send iterates recipients, so a bare string would decrypt per character."""
+    path = _write_meta(
+        tmp_path,
+        [{"id": "a", "encryption": {"algorithm": "age", "recipients": "age1abc"}}],
+    )
+    with pytest.raises(manifest.BtrbakError, match="recipients' must be a list of strings"):
+        manifest.load(path)
+
+
+def test_load_rejects_non_string_recipient(tmp_path):
+    path = _write_meta(
+        tmp_path,
+        [{"id": "a", "encryption": {"algorithm": "age", "recipients": [{"k": 1}]}}],
+    )
+    with pytest.raises(manifest.BtrbakError, match="recipients' must be a list of strings"):
+        manifest.load(path)
+
+
+def test_load_rejects_non_string_identity(tmp_path):
+    path = _write_meta(
+        tmp_path,
+        [{"id": "a", "encryption": {"algorithm": "age", "recipients": [], "identity": 3}}],
+    )
+    with pytest.raises(manifest.BtrbakError, match="identity' must be a string or null"):
+        manifest.load(path)
+
+
+def test_codec_validation_names_the_offending_snapshot(tmp_path):
+    path = _write_meta(
+        tmp_path, [{"id": "good"}, {"id": "bad", "compression": "xz"}]
+    )
+    with pytest.raises(manifest.BtrbakError, match=r"\(bad\)"):
+        manifest.load(path)

@@ -80,6 +80,63 @@ def _validate_snapshots(profile_name: str, snapshots: list) -> None:
         for upload in uploads:
             if not isinstance(upload, dict):
                 raise BtrbakError(f"{where} ({sid}) each upload must be a mapping")
+        for key in ("compression", "encryption"):
+            if key in snap:
+                snap[key] = _validate_codec(where, sid, key, snap[key])
+
+
+def _validate_codec(where: str, sid: str, key: str, value):
+    """Validate a per-snapshot ``compression``/``encryption`` record.
+
+    These are recorded per snapshot precisely so a profile's codec can change
+    without breaking the chains already written, and ``restore`` feeds them
+    straight back into :mod:`send`, which indexes them with ``.get()``. A
+    manifest is untrusted input -- on the disaster-recovery path it is
+    downloaded from a remote -- so a string or list where a mapping belongs
+    would otherwise reach ``send`` and escape as an ``AttributeError``
+    traceback rather than a one-line ``error:`` (§8.1).
+
+    ``None`` is preserved: it means "no codec", which is how a local-only
+    snapshot and any manifest written before per-snapshot codecs existed are
+    recorded.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise BtrbakError(
+            f"{where} ({sid}) {key!r} must be a mapping or null, "
+            f"not {type(value).__name__}"
+        )
+    algorithm = value.get("algorithm")
+    if not isinstance(algorithm, str) or not algorithm:
+        raise BtrbakError(
+            f"{where} ({sid}) {key!r} must have a non-empty string 'algorithm'"
+        )
+    if key == "compression":
+        level = value.get("level", 6)
+        # send.send_snapshot coerces the level with int(); a non-numeric value
+        # here would raise ValueError from inside a backup or a restore.
+        if isinstance(level, bool) or not isinstance(level, int):
+            if not (isinstance(level, str) and level.lstrip("+-").isdigit()):
+                raise BtrbakError(
+                    f"{where} ({sid}) 'compression.level' must be an integer, "
+                    f"not {level!r}"
+                )
+    else:
+        recipients = value.get("recipients")
+        if recipients is not None and (
+            not isinstance(recipients, list)
+            or not all(isinstance(r, str) for r in recipients)
+        ):
+            raise BtrbakError(
+                f"{where} ({sid}) 'encryption.recipients' must be a list of strings"
+            )
+        identity = value.get("identity")
+        if identity is not None and not isinstance(identity, str):
+            raise BtrbakError(
+                f"{where} ({sid}) 'encryption.identity' must be a string or null"
+            )
+    return value
 
 
 def save(path, meta: dict) -> None:
