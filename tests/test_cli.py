@@ -1101,6 +1101,77 @@ def test_verify_uses_remote_manifest_fallback(tmp_path, monkeypatch, capsys):
     assert "verifying against a remote copy" in capsys.readouterr().out
 
 
+def test_load_meta_for_verify_downloads_from_the_first_remote_that_has_one(
+    tmp_path, monkeypatch
+):
+    """The disaster-recovery path: no local meta.yaml, only remote copies."""
+    remote_meta = {"version": 1, "profiles": {"daily": {"snapshots": []}}}
+    served = []
+
+    class _Serves:
+        def read(self, remote_path, local_dest):
+            served.append(remote_path)
+            local_dest.write_text(yaml.safe_dump(remote_meta))
+
+    class _Unavailable:
+        def read(self, remote_path, local_dest):
+            raise cli.RemoteNotFoundError("nope")
+
+    remotes = [_Unavailable(), _Serves()]
+    specs = [RemoteSpec("a", "dir", {"type": "dir", "path": "/a"}),
+             RemoteSpec("b", "dir", {"type": "dir", "path": "/b"})]
+    monkeypatch.setattr(cli, "create_remote", lambda spec: remotes.pop(0))
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400, specs)})
+    cfg.name = "root"
+    cfg.dest = tmp_path / "dest"
+    cfg.tmpdir = tmp_path / "tmp"
+    cfg.dest.mkdir(parents=True)
+
+    meta, from_remote = cli._load_meta_for_verify(cfg)
+
+    assert from_remote is True
+    assert meta == remote_meta
+    assert served == ["meta.yaml"]
+    assert not (cfg.tmpdir / cfg.name / "verify").exists()
+
+
+def test_load_meta_for_verify_prefers_the_local_manifest(tmp_path, monkeypatch):
+    local = {"version": 1, "profiles": {"daily": {"snapshots": []}}}
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg.name = "root"
+    cfg.dest = tmp_path / "dest"
+    cfg.tmpdir = tmp_path / "tmp"
+    cfg.dest.mkdir(parents=True)
+    (cfg.dest / "meta.yaml").write_text(yaml.safe_dump(local))
+    monkeypatch.setattr(
+        cli,
+        "create_remote",
+        lambda spec: pytest.fail("must not touch a remote when dest/meta.yaml exists"),
+    )
+
+    meta, from_remote = cli._load_meta_for_verify(cfg)
+
+    assert meta == local
+    assert from_remote is False
+
+
+def test_load_meta_for_verify_reports_nothing_available(tmp_path, monkeypatch):
+    class _Unavailable:
+        def read(self, remote_path, local_dest):
+            raise cli.RemoteNotFoundError("nope")
+
+    monkeypatch.setattr(cli, "create_remote", lambda spec: _Unavailable())
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400,
+                                 [RemoteSpec("a", "dir", {"type": "dir", "path": "/a"})])})
+    cfg.name = "root"
+    cfg.dest = tmp_path / "dest"
+    cfg.tmpdir = tmp_path / "tmp"
+    cfg.dest.mkdir(parents=True)
+
+    assert cli._load_meta_for_verify(cfg) == (None, False)
+    assert not (cfg.tmpdir / cfg.name / "verify").exists()
+
+
 def test_verify_continues_past_bad_remote_config(tmp_path, monkeypatch, capsys):
     """One broken config must not hide the result of every other config."""
     good, _ = _verify_setup(tmp_path, monkeypatch, [_sent()], name="good")
