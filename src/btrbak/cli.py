@@ -864,7 +864,9 @@ def _load_meta_for_verify(cfg):
     if local.exists():
         return manifest.load(local), False
 
-    with util.scratch_dir(cfg.tmpdir / cfg.name / "verify", cfg.tmpdir) as tmpdir:
+    with util.scratch_dir(
+        cfg.tmpdir / cfg.name / util.VERIFY_SCRATCH, cfg.tmpdir
+    ) as tmpdir:
         seen = set()
         for profile in cfg.profiles.values():
             for spec in profile.remotes:
@@ -937,7 +939,9 @@ def _verify_config(cfg) -> int:
                 "verifying against a remote copy"
             )
         by_profile = collect_remotes(cfg)
-        with util.scratch_dir(cfg.tmpdir / cfg.name / "verify", cfg.tmpdir) as tmpdir:
+        with util.scratch_dir(
+        cfg.tmpdir / cfg.name / util.VERIFY_SCRATCH, cfg.tmpdir
+    ) as tmpdir:
             for pname in cfg.profiles:
                 lookup = {spec.id: (spec, remote) for spec, remote in by_profile[pname]}
                 for snap in manifest.snapshots(meta, pname):

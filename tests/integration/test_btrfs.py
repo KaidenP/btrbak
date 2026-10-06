@@ -410,7 +410,7 @@ def test_restore_resumes_into_a_recovered_target(btrfs_fs, monkeypatch):
     # Re-running over the already-received link is a no-op, not a failure.
     restore.run_restore(cfg, "daily", full_id, target)
     assert (target / full_id / "a.txt").read_text() == "a\n"
-    assert not (cfg.tmpdir / cfg.name / "restore").exists()
+    assert not (cfg.tmpdir / cfg.name / util.RESTORE_SCRATCH).exists()
 
 
 def test_restore_rejects_a_corrupt_stream_without_creating_the_target(
@@ -494,4 +494,4 @@ def test_verify_leaves_no_staging_directory(btrfs_fs, monkeypatch):
     cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
 
     assert cli._verify_config(cfg) == 0
-    assert not (cfg.tmpdir / cfg.name / "verify").exists()
+    assert not (cfg.tmpdir / cfg.name / util.VERIFY_SCRATCH).exists()

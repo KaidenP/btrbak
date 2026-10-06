@@ -6,7 +6,15 @@ from pathlib import Path
 from . import manifest
 from . import send
 from .remotes import create_remote
-from .util import BtrbakError, is_btrfs, is_subvolume, scratch_dir, sha256_file, subvolume_uuid
+from .util import (
+    BtrbakError,
+    RESTORE_SCRATCH,
+    is_btrfs,
+    is_subvolume,
+    scratch_dir,
+    sha256_file,
+    subvolume_uuid,
+)
 
 
 def build_chain(meta: dict, profile_name: str, snapshot_id: str) -> list[str]:
@@ -192,7 +200,9 @@ def run_restore(config, profile_name, snapshot_id, target) -> None:
     if profile_name not in config.profiles:
         raise BtrbakError(f"unknown profile: {profile_name}")
 
-    with scratch_dir(config.tmpdir / config.name / "restore", config.tmpdir) as tmpdir:
+    with scratch_dir(
+        config.tmpdir / config.name / RESTORE_SCRATCH, config.tmpdir
+    ) as tmpdir:
         meta = load_meta_for_restore(config, profile_name, tmpdir)
         restore(config, profile_name, snapshot_id, target, meta, tmpdir)
 

@@ -16,6 +16,18 @@ class BtrbakError(Exception):
     """Base class for expected, user-facing failures."""
 
 
+# Scratch subdirectories under ``<tmpdir>/<SUBVOL>/`` used by ``verify`` and
+# ``restore`` for their downloads. The leading dot namespaces them away from
+# the per-profile staging directories, whose names come from the profile name
+# and therefore can never start with one (``PROFILE_NAME_RE`` requires a
+# leading letter or digit). Without it a profile literally named ``verify`` or
+# ``restore`` -- both legal -- would stage a send file at the very path a
+# concurrent verify or restore is downloading into, and the two locks (the
+# ``dest`` lock vs. the ``tmpdir`` lock) do not exclude each other.
+VERIFY_SCRATCH = ".verify"
+RESTORE_SCRATCH = ".restore"
+
+
 def run(cmd, stdout=None, stdin=None, check=True) -> subprocess.CompletedProcess:
     """Run a command, returning the CompletedProcess.
 

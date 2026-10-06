@@ -7,6 +7,7 @@ import yaml
 
 from btrbak import cli
 from btrbak import manifest
+from btrbak import util
 from btrbak.config import Config, Profile, RemoteSpec
 
 
@@ -1132,7 +1133,7 @@ def test_load_meta_for_verify_downloads_from_the_first_remote_that_has_one(
     assert from_remote is True
     assert meta == remote_meta
     assert served == ["meta.yaml"]
-    assert not (cfg.tmpdir / cfg.name / "verify").exists()
+    assert not (cfg.tmpdir / cfg.name / util.VERIFY_SCRATCH).exists()
 
 
 def test_load_meta_for_verify_prefers_the_local_manifest(tmp_path, monkeypatch):
@@ -1169,7 +1170,37 @@ def test_load_meta_for_verify_reports_nothing_available(tmp_path, monkeypatch):
     cfg.dest.mkdir(parents=True)
 
     assert cli._load_meta_for_verify(cfg) == (None, False)
-    assert not (cfg.tmpdir / cfg.name / "verify").exists()
+    assert not (cfg.tmpdir / cfg.name / util.VERIFY_SCRATCH).exists()
+
+
+def test_scratch_dir_names_cannot_collide_with_a_profile_name():
+    """A profile named `verify`/`restore` is legal and must not stage into the
+    same directory verify/restore download into."""
+    from btrbak.config import PROFILE_NAME_RE
+
+    for name in (cli.util.VERIFY_SCRATCH.lstrip("."), cli.util.RESTORE_SCRATCH.lstrip(".")):
+        assert PROFILE_NAME_RE.match(name), name
+    assert cli.util.VERIFY_SCRATCH.startswith(".")
+    assert cli.util.RESTORE_SCRATCH.startswith(".")
+    assert cli.util.VERIFY_SCRATCH != cli.util.RESTORE_SCRATCH
+
+
+def test_run_restore_uses_the_namespaced_scratch_dir(tmp_path, monkeypatch):
+    from btrbak import restore as restore_mod
+
+    cfg, _remote = _verify_setup(tmp_path, monkeypatch, [_sent()])
+    seen = {}
+    real = restore_mod.restore
+
+    def spy(config, profile_name, snapshot_id, target, meta, tmpdir):
+        seen["tmpdir"] = tmpdir
+        return real(config, profile_name, snapshot_id, target, meta, tmpdir)
+
+    monkeypatch.setattr(restore_mod, "restore", spy)
+    with pytest.raises(restore_mod.BtrbakError):
+        restore_mod.run_restore(cfg, "daily", "s1", tmp_path / "target")
+
+    assert seen["tmpdir"].name == cli.util.RESTORE_SCRATCH
 
 
 def test_verify_continues_past_bad_remote_config(tmp_path, monkeypatch, capsys):
