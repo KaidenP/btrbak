@@ -19,6 +19,7 @@ from .util import (
 
 def build_chain(meta: dict, profile_name: str, snapshot_id: str) -> list[str]:
     """Return the root→target chain of snapshot ids for *snapshot_id*."""
+    by_id = manifest.snapshots_by_id(meta, profile_name)
     chain = []
     current = snapshot_id
     seen = set()
@@ -27,12 +28,12 @@ def build_chain(meta: dict, profile_name: str, snapshot_id: str) -> list[str]:
             raise BtrbakError("dependency cycle in manifest")
         seen.add(current)
         chain.append(current)
-        snap = manifest.get_snapshot(meta, profile_name, current)
+        snap = by_id.get(current)
         if snap is None:
             raise BtrbakError(f"missing snapshot in chain: {current}")
         current = snap.get("parent")
     chain.reverse()
-    root = manifest.get_snapshot(meta, profile_name, chain[0])
+    root = by_id.get(chain[0])
     if root is not None and root.get("type") == "incr":
         raise BtrbakError(
             f"chain root {chain[0]} is incremental; expected a full backup"
@@ -86,6 +87,7 @@ def _resume_point(target: Path, chain: list[str], meta: dict, profile_name: str)
     under a snapshot id, or a subvolume with a different UUID, since either
     would block ``btrfs receive`` or silently invalidate the chain.
     """
+    by_id = manifest.snapshots_by_id(meta, profile_name)
     for index, sid in enumerate(chain):
         entry = target / sid
         if not entry.exists():
@@ -95,7 +97,7 @@ def _resume_point(target: Path, chain: list[str], meta: dict, profile_name: str)
                 f"restore target already contains {entry} which is not a btrfs "
                 "subvolume; remove it before restoring"
             )
-        expected = (manifest.get_snapshot(meta, profile_name, sid) or {}).get("uuid")
+        expected = (by_id.get(sid) or {}).get("uuid")
         if not expected:
             continue
         actual = subvolume_uuid(entry)
@@ -133,6 +135,7 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
         raise BtrbakError(f"snapshot not found: {profile_name}/{snapshot_id}")
 
     chain = build_chain(meta, profile_name, snapshot_id)
+    by_id = manifest.snapshots_by_id(meta, profile_name)
     remote_map = {
         spec.id: create_remote(spec) for spec in config.profiles[profile_name].remotes
     }
@@ -140,7 +143,9 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
     # Validate the whole chain, and the resume point, before creating the
     # target: a rejected restore must never leave an empty directory behind.
     for sid in chain:
-        snap = manifest.get_snapshot(meta, profile_name, sid)
+        snap = by_id.get(sid)
+        if snap is None:
+            raise BtrbakError(f"missing snapshot in chain: {sid}")
         if snap.get("type") == "local":
             raise BtrbakError(
                 f"snapshot {sid} is local-only and has no offsite copy; "
@@ -165,7 +170,9 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
     # file is then reused for that link, so this costs no extra download.
     staged: Path | None = None
     if pending:
-        first = manifest.get_snapshot(meta, profile_name, pending[0])
+        first = by_id.get(pending[0])
+        if first is None:
+            raise BtrbakError(f"missing snapshot in chain: {pending[0]}")
         staged = tmpdir / f"{pending[0]}.send"
         try:
             download_link(pick_remote(first, remote_map), first, staged)
@@ -181,7 +188,9 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
 
     try:
         for index, sid in enumerate(pending):
-            snap = manifest.get_snapshot(meta, profile_name, sid)
+            snap = by_id.get(sid)
+            if snap is None:
+                raise BtrbakError(f"missing snapshot in chain: {sid}")
             tmpfile = staged if index == 0 else tmpdir / f"{sid}.send"
             try:
                 if index:

@@ -571,8 +571,9 @@ def prune(cfg, meta, by_profile, meta_path=None) -> None:
     """
     now_ts = util.now()
     for pname, profile in cfg.profiles.items():
+        by_id = manifest.snapshots_by_id(meta, pname)
         for sid in retention.plan_prune(meta, pname, profile.keep, now_ts):
-            snap = manifest.get_snapshot(meta, pname, sid)
+            snap = by_id.get(sid)
             snap_path = cfg.dest / pname / sid
             if snap_path.exists():
                 snapshot.delete_snapshot(snap_path)
@@ -1056,9 +1057,10 @@ def _verify_config(cfg, configured=None) -> int:
         ) as tmpdir:
             for pname in cfg.profiles:
                 lookup = {spec.id: (spec, remote) for spec, remote in by_profile[pname]}
+                by_id = manifest.snapshots_by_id(meta, pname)
                 for snap in manifest.snapshots(meta, pname):
                     failures += _verify_snapshot(
-                        cfg, meta, pname, snap, lookup, tmpdir
+                        cfg, meta, pname, snap, lookup, by_id, tmpdir
                     )
         # Reported on both paths: a config can be drifting and stranding at
         # once, and the run that finally surfaces the strand is not one to
@@ -1092,7 +1094,7 @@ def _receivable(snap, lookup) -> bool:
     )
 
 
-def _verify_snapshot(cfg, meta, pname, snap, lookup, tmpdir) -> int:
+def _verify_snapshot(cfg, meta, pname, snap, lookup, by_id, tmpdir) -> int:
     """Verify a single snapshot against its local subvolume and remotes."""
     failures = 0
     sid = snap.get("id")
@@ -1114,7 +1116,7 @@ def _verify_snapshot(cfg, meta, pname, snap, lookup, tmpdir) -> int:
 
     parent = snap.get("parent")
     if parent:
-        parent_snap = manifest.get_snapshot(meta, pname, parent)
+        parent_snap = by_id.get(parent)
         if parent_snap is None:
             print(f"BROKEN CHAIN {where}: parent {parent} missing")
             failures += 1
