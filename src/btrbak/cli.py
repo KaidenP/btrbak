@@ -912,11 +912,37 @@ def _verify_config(cfg) -> int:
         return failures
 
 
+def _receivable(snap, lookup) -> bool:
+    """Return True when ``restore`` could actually replay *snap*.
+
+    A link has to carry a send file and a complete upload on a remote that is
+    still configured, because that is exactly what ``restore.pick_remote``
+    looks for. Anything weaker would let ``verify`` bless a chain that
+    ``restore`` then refuses -- most visibly a parent whose remotes were all
+    removed, which retention deliberately keeps (``committed: true``) but
+    which can no longer be received from anywhere.
+    """
+    if snap.get("type") == "local" or not snap.get("file"):
+        return False
+    return any(
+        upload.get("status") == "complete" and upload.get("remote") in lookup
+        for upload in snap.get("uploads") or []
+    )
+
+
 def _verify_snapshot(cfg, meta, pname, snap, lookup, tmpdir) -> int:
     """Verify a single snapshot against its local subvolume and remotes."""
     failures = 0
     sid = snap.get("id")
     where = f"{cfg.name}/{pname}/{sid}"
+
+    if snap.get("local_deleted"):
+        # The local subvolume is already gone and the entry survives only so
+        # the remote delete can be retried (see §8). Nothing is left to
+        # verify: the remotes that did drop their object would be reported
+        # MISSING, which is noise about a state btrbak created itself.
+        print(f"PENDING REMOTE DELETE {where}: local subvolume removed, awaiting retry")
+        return 0
 
     if snap.get("type") == "local":
         if not (cfg.dest / pname / sid).exists():
@@ -936,7 +962,7 @@ def _verify_snapshot(cfg, meta, pname, snap, lookup, tmpdir) -> int:
                 "chain can never be restored offsite"
             )
             failures += 1
-        elif not manifest.committed(parent_snap):
+        elif not _receivable(parent_snap, lookup):
             print(
                 f"BROKEN CHAIN {where}: parent {parent} has no complete upload"
             )
@@ -944,6 +970,14 @@ def _verify_snapshot(cfg, meta, pname, snap, lookup, tmpdir) -> int:
 
     uploads = snap.get("uploads") or []
     if not uploads:
+        if manifest.committed(snap):
+            # Every remote was removed from the profile, so the entry is kept
+            # with `committed: true` purely so retention prunes it by age like
+            # a local snapshot (§8). There is no offsite copy left to check;
+            # calling that a failure would make verify exit 1 on every run for
+            # as long as the entry survives.
+            print(f"OK {where}: no remotes configured, nothing offsite to verify")
+            return failures
         print(f"INCOMPLETE {where}: no uploads recorded")
         return failures + 1
 

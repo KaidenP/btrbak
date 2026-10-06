@@ -964,6 +964,77 @@ def test_verify_reports_no_uploads(tmp_path, monkeypatch, capsys):
     assert "no uploads recorded" in capsys.readouterr().out
 
 
+def test_verify_accepts_a_snapshot_whose_remotes_were_all_removed(
+    tmp_path, monkeypatch, capsys
+):
+    """`committed: true` with no uploads is a deliberate terminal state.
+
+    Every remote was removed from the profile (§8), so retention prunes the
+    entry by age like a local snapshot. There is no offsite copy left to
+    check and calling that a failure would make verify exit 1 forever.
+    """
+    snap = _sent(uploads=[], committed=True)
+    _verify_setup(tmp_path, monkeypatch, [snap])
+    assert cli.cmd_verify(_verify_args()) == 0
+    assert "nothing offsite to verify" in capsys.readouterr().out
+
+
+def test_verify_reports_an_unreceivable_parent_with_no_uploads(
+    tmp_path, monkeypatch, capsys
+):
+    """A parent with no complete upload anywhere makes the chain unrestorable."""
+    parent = _sent(id="p1", type="full", uploads=[], committed=True)
+    _verify_setup(
+        tmp_path,
+        monkeypatch,
+        [parent, _sent(id="s2", type="incr", parent="p1")],
+    )
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "BROKEN CHAIN" in capsys.readouterr().out
+
+
+def test_verify_reports_a_parent_uploaded_to_an_removed_remote(
+    tmp_path, monkeypatch, capsys
+):
+    """`restore` picks a remote by id, so an unconfigured one is not usable."""
+    parent = _sent(id="p1", type="full", uploads=[{"remote": "gone", "status": "complete"}])
+    _verify_setup(
+        tmp_path,
+        monkeypatch,
+        [parent, _sent(id="s2", type="incr", parent="p1")],
+    )
+    assert cli.cmd_verify(_verify_args()) == 1
+    assert "no complete upload" in capsys.readouterr().out
+
+
+def test_verify_skips_a_snapshot_pending_a_remote_delete(
+    tmp_path, monkeypatch, capsys
+):
+    """`local_deleted` keeps an entry only so the remote delete can be retried.
+
+    Checking its objects would report the remotes that already dropped them
+    as MISSING -- noise about a state btrbak created itself.
+    """
+    snap = _sent(local_deleted=True)
+    _verify_setup(tmp_path, monkeypatch, [snap], remote=_MissingRemote())
+    assert cli.cmd_verify(_verify_args()) == 0
+    out = capsys.readouterr().out
+    assert "PENDING REMOTE DELETE" in out
+    assert "MISSING" not in out
+
+
+def test_receivable_requires_a_file_and_a_configured_complete_upload():
+    lookup = {"offsite": object()}
+    assert cli._receivable(_sent(), lookup)
+    assert not cli._receivable(_sent(uploads=[]), lookup)
+    assert not cli._receivable(_sent(uploads=[{"remote": "offsite", "status": "failed"}]), lookup)
+    assert not cli._receivable(_sent(uploads=[{"remote": "gone", "status": "complete"}]), lookup)
+    assert not cli._receivable(_local("s1", 1000), lookup)
+    no_file = _sent()
+    no_file.pop("file")
+    assert not cli._receivable(no_file, lookup)
+
+
 def test_verify_reports_unknown_remote(tmp_path, monkeypatch, capsys):
     _verify_setup(tmp_path, monkeypatch, [_sent(uploads=[{"remote": "gone", "status": "complete"}])])
     assert cli.cmd_verify(_verify_args()) == 1

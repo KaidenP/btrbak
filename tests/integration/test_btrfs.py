@@ -445,6 +445,41 @@ def test_restore_rejects_a_corrupt_stream_without_creating_the_target(
     assert not target.exists()
 
 
+def test_verify_reports_a_snapshot_whose_remotes_were_all_removed(btrfs_fs, monkeypatch):
+    """A profile that loses its remotes settles into a state verify must accept.
+
+    Reconcile marks the orphaned entry `committed: true` so retention prunes
+    it by age like a local snapshot; verify flagging it INCOMPLETE would make
+    every run exit 1 until `keep` expires.
+    """
+    mnt = btrfs_fs
+    src, snapshots, _target = _setup(mnt, "orphaned")
+    remote_root = mnt / "orphaned" / "remote"
+    tmpdir = mnt / "orphaned" / "tmp"
+    remote_root.mkdir()
+    tmpdir.mkdir()
+    cfg = _pipeline_cfg(mnt, "orphaned", src, snapshots, remote_root, tmpdir)
+
+    (src / "a.txt").write_text("a\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 0)
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
+
+    # The remote is removed from the profile; the snapshot keeps no uploads.
+    spec = cfg.profiles["daily"].remotes[0]
+    local_only = replace(
+        cfg, profiles={"daily": replace(cfg.profiles["daily"], remotes=[])}
+    )
+    monkeypatch.setattr(cli.util, "now", lambda: 10)
+    cli.run_config(local_only, None, False, False, False, dry_run=False)
+
+    meta = manifest.load(snapshots / "meta.yaml")
+    orphaned = manifest.snapshots(meta, "daily")[0]
+    assert orphaned["uploads"] == []
+    assert orphaned["committed"] is True
+
+    assert cli._verify_config(cfg) == 0
+
+
 def test_verify_leaves_no_staging_directory(btrfs_fs, monkeypatch):
     mnt = btrfs_fs
     src, snapshots, _target = _setup(mnt, "verify_tmp")
