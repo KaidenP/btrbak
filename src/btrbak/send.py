@@ -20,16 +20,51 @@ def _use_age(encryption) -> bool:
     return bool(encryption and encryption.get("algorithm") == "age")
 
 
+def _codec_level(compression) -> int:
+    """Return the xz preset from a ``compression`` record.
+
+    Accepts a numeric string because a manifest written by hand (or by a
+    different version) may quote the level; anything else raises
+    :class:`BtrbakError` rather than a bare :class:`ValueError`. ``manifest``
+    validation already rejects the hopeless cases up front.
+    """
+    level = compression.get("level", 6)
+    try:
+        return int(level)
+    except (TypeError, ValueError) as exc:
+        raise BtrbakError(
+            f"invalid xz compression level {level!r}; expected an integer 0-9"
+        ) from exc
+
+
 def compress_file(src, dst, preset: int = 6) -> None:
-    with open(src, "rb") as source, lzma.open(
-        dst, "wb", format=lzma.FORMAT_XZ, preset=preset
-    ) as sink:
-        shutil.copyfileobj(source, sink)
+    try:
+        with open(src, "rb") as source, lzma.open(
+            dst, "wb", format=lzma.FORMAT_XZ, preset=preset
+        ) as sink:
+            shutil.copyfileobj(source, sink)
+    except lzma.LZMAError as exc:
+        raise BtrbakError(f"xz compression failed: {exc}") from exc
 
 
 def decompress_file(src, dst) -> None:
-    with lzma.open(src, "rb") as source, open(dst, "wb") as sink:
-        shutil.copyfileobj(source, sink)
+    """Decode an xz stream.
+
+    A stream that is corrupt or truncated raises :class:`lzma.LZMAError` or
+    :class:`EOFError`, neither of which is a ``BtrbakError``/``OSError``, so
+    both are translated here. Otherwise a bad send file reaches the CLI's top
+    level and prints a raw traceback instead of the one-line ``error:`` every
+    other failure produces (§12).
+    """
+    try:
+        with lzma.open(src, "rb") as source, open(dst, "wb") as sink:
+            shutil.copyfileobj(source, sink)
+    except lzma.LZMAError as exc:
+        raise BtrbakError(f"xz decompression failed: {exc}") from exc
+    except EOFError as exc:
+        raise BtrbakError(
+            f"xz stream is truncated: {exc or 'ended before the end-of-stream marker'}"
+        ) from exc
 
 
 def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None) -> None:
@@ -63,15 +98,21 @@ def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None)
         current = raw
 
         if use_xz:
-            level = int(compression.get("level", 6))
+            level = _codec_level(compression)
             compressed = work / (out_path.name + ".xz")
             intermediates.append(compressed)
             compress_file(current, compressed, level)
             current = compressed
 
         if use_age:
+            recipients = encryption.get("recipients") or []
+            if not recipients:
+                raise BtrbakError(
+                    "encryption is enabled but no age recipient is recorded; "
+                    "the snapshot cannot be sent"
+                )
             age_cmd = ["age"]
-            for recipient in encryption["recipients"]:
+            for recipient in recipients:
                 kind = age_recipient_kind(recipient)
                 if kind == "file":
                     age_cmd += ["-R", str(recipient)]
