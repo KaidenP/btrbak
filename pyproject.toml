@@ -7,6 +7,7 @@ name = "btrbak"
 version = "1.1.0"
 description = "btrfs snapshot and offsite backup utility"
 readme = "README.md"
+license = "Proprietary"
 requires-python = ">=3.10"
 dependencies = [
     "PyYAML>=6",
@@ -20,7 +21,9 @@ btrbak = "btrbak.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["btrbak", "btrbak.remotes"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

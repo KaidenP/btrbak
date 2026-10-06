@@ -9,13 +9,18 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build .deb
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Install build dependencies
         run: |
@@ -31,22 +36,60 @@ jobs:
           dpkg-deb --contents dist/btrbak_*.deb
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: btrbak-deb
           path: dist/*.deb
           if-no-files-found: error
+
+  test:
+    name: Run unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install test dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet pyyaml pytest google-api-python-client google-auth google-auth-oauthlib
+
+      - name: Run unit tests
+        run: .venv/bin/python -m pytest tests -q
+
+  integration:
+    name: Run btrfs integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Best-effort: loop-device mounts can be flaky on shared runners, so a
+    # failure here must not block unrelated changes.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y btrfs-progs
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet pyyaml pytest
+
+      - name: Run integration tests (root)
+        run: sudo .venv/bin/python -m pytest tests/integration/test_btrfs.py -q
 
   release:
     name: Create release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
       - name: Download artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: btrbak-deb
           path: artifact
@@ -54,9 +97,11 @@ jobs:
       - name: Create release and upload .deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
-          tag="${{ github.ref_name }}"
-          repo="${{ github.repository }}"
+          tag="$TAG"
+          repo="$REPO"
           gh release view "$tag" --repo "$repo" >/dev/null 2>&1 || \
             gh release create "$tag" --title "$tag" --generate-notes --repo "$repo"
           gh release upload "$tag" artifact/*.deb --clobber --repo "$repo"

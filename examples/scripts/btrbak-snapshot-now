@@ -6,7 +6,13 @@
 #
 # With no arguments this forces a snapshot for every configured profile.
 # With SUBVOL and/or PROFILE the snapshot is scoped accordingly.
+#
+# NOTE: This script is shipped under the examples documentation directory
+# (e.g. /usr/share/doc/btrbak/examples/), not installed into /usr/bin, so it
+# is not on the default PATH.
 
 set -eu
 
-exec /usr/bin/btrbak run "$@" --force
+# --force is placed before "$@" so a user-supplied -n/--dry-run (which the
+# trailing --force would otherwise silently contradict) keeps its meaning.
+exec /usr/bin/btrbak run --force "$@"

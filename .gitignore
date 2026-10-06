@@ -6,3 +6,9 @@ __pycache__/
 build/
 dist/
 man/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.swp
+*.deb

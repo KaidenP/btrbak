@@ -12,6 +12,12 @@ Type=oneshot
 ExecStart=/usr/bin/btrbak run --group boot --force
 Nice=10
 IOSchedulingClass=idle
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
 
 [Install]
 WantedBy=multi-user.target

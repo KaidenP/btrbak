@@ -7,7 +7,11 @@
 set -eu
 
 MARKER=/var/tmp/btrbak-apt-pre.stamp
-TTL_SECONDS=600
+# A single apt transaction (e.g. a large dist-upgrade) can run dpkg for far
+# longer than the original 600 s window, which would snapshot again
+# mid-transaction. One hour covers realistic transactions; the trade-off is
+# that two *separate* apt runs started within the window share one snapshot.
+TTL_SECONDS=3600
 
 now=$(date +%s)
 if [ -f "$MARKER" ]; then
@@ -17,5 +21,11 @@ if [ -f "$MARKER" ]; then
     fi
 fi
 
-touch "$MARKER"
+if ! touch "$MARKER" 2>/dev/null; then
+    # The caller invokes us via `|| true`, so without this warning a failed
+    # marker write (e.g. a read-only /var/tmp) would silently skip the
+    # snapshot with no way for the admin to notice.
+    echo "btrbak-apt-pre: cannot write marker $MARKER; skipping snapshot" >&2
+    exit 1
+fi
 exec /usr/bin/btrbak run --group apt --force
