@@ -99,6 +99,21 @@ def _resume_point(target: Path, chain: list[str], meta: dict, profile_name: str)
     return len(chain)
 
 
+def download_link(remote, snap: dict, tmpfile: Path) -> None:
+    """Download one send stream into *tmpfile* and check it against the manifest.
+
+    The local copy is authoritative, so a stream that does not match the
+    recorded ``sha256``/``size`` is rejected here rather than handed to
+    ``btrfs receive``, which would fail cryptically or (worse) replay
+    something the manifest never described.
+    """
+    remote.read(snap["file"], tmpfile)
+    if sha256_file(tmpfile) != snap.get("sha256"):
+        raise BtrbakError(f"checksum mismatch for snapshot {snap['id']}")
+    if tmpfile.stat().st_size != snap.get("size"):
+        raise BtrbakError(f"size mismatch for snapshot {snap['id']}")
+
+
 def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
     target = Path(target)
     if target.exists() and not target.is_dir():
@@ -133,33 +148,51 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
             f"present in {target}",
             file=sys.stderr,
         )
-    # Create the target only once it is known to be usable, so that a failed
-    # validation never leaves an empty directory tree behind.
+    pending = chain[resume_at:]
+
+    # Fetch and verify the first remaining link *before* the target exists.
+    # Everything checkable from the manifest has been checked above; the one
+    # thing left is the object's own integrity, and discovering a corrupt or
+    # unreachable stream must not leave an empty TARGET behind. The staged
+    # file is then reused for that link, so this costs no extra download.
+    staged: Path | None = None
+    if pending:
+        first = manifest.get_snapshot(meta, profile_name, pending[0])
+        staged = tmpdir / f"{pending[0]}.send"
+        try:
+            download_link(pick_remote(first, remote_map), first, staged)
+        except BaseException:
+            staged.unlink(missing_ok=True)
+            raise
+
+    # Create the target only once it is known to be usable: every manifest
+    # check has passed and the first stream is downloaded and verified. A
+    # restore rejected at any earlier point therefore never leaves an empty
+    # directory tree behind.
     target.mkdir(parents=True, exist_ok=True)
 
-    for sid in chain[resume_at:]:
-        snap = manifest.get_snapshot(meta, profile_name, sid)
-        remote = pick_remote(snap, remote_map)
-
-        compression, encryption = codec_for_snapshot(snap, config)
-        tmpfile = tmpdir / f"{sid}.send"
-        try:
-            remote.read(snap["file"], tmpfile)
-            if sha256_file(tmpfile) != snap.get("sha256"):
-                raise BtrbakError(f"checksum mismatch for snapshot {sid}")
-            if tmpfile.stat().st_size != snap.get("size"):
-                raise BtrbakError(f"size mismatch for snapshot {sid}")
-
-            send.restore_stream(tmpfile, target, compression, encryption)
-        finally:
-            tmpfile.unlink(missing_ok=True)
+    try:
+        for index, sid in enumerate(pending):
+            snap = manifest.get_snapshot(meta, profile_name, sid)
+            tmpfile = staged if index == 0 else tmpdir / f"{sid}.send"
+            try:
+                if index:
+                    download_link(pick_remote(snap, remote_map), snap, tmpfile)
+                compression, encryption = codec_for_snapshot(snap, config)
+                send.restore_stream(tmpfile, target, compression, encryption)
+            finally:
+                if index:
+                    tmpfile.unlink(missing_ok=True)
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
 
 
 def run_restore(config, profile_name, snapshot_id, target) -> None:
     if profile_name not in config.profiles:
         raise BtrbakError(f"unknown profile: {profile_name}")
 
-    with scratch_dir(config.tmpdir / config.name / "restore") as tmpdir:
+    with scratch_dir(config.tmpdir / config.name / "restore", config.tmpdir) as tmpdir:
         meta = load_meta_for_restore(config, profile_name, tmpdir)
         restore(config, profile_name, snapshot_id, target, meta, tmpdir)
 

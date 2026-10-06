@@ -218,6 +218,124 @@ def test_restore_does_not_create_target_when_chain_is_unusable(tmp_path, monkeyp
     assert not (tmp_path / "target").exists()
 
 
+# --- a bad download must not leave a target behind -------------------------
+
+
+@pytest.mark.parametrize(
+    "mismatch, message",
+    [
+        ({"sha256": "other"}, "checksum mismatch"),
+        ({"size": 999}, "size mismatch"),
+    ],
+)
+def test_restore_does_not_create_target_on_a_bad_download(
+    tmp_path, monkeypatch, mismatch, message
+):
+    """The stream's own integrity is checked before the target is created.
+
+    Everything else is validated from the manifest up front, but a corrupt or
+    truncated object can only be discovered by fetching it -- and finding that
+    out must not leave an empty TARGET directory behind.
+    """
+    target = tmp_path / "target"
+    monkeypatch.setattr(restore, "is_btrfs", lambda path: True)
+    snap = {
+        "id": "sid",
+        "type": "full",
+        "parent": None,
+        "file": "p/sid.send",
+        "sha256": "d",
+        "size": 1,
+        "uploads": [{"remote": "r", "status": "complete"}],
+    }
+    snap.update(mismatch)
+    meta = {"version": 1, "profiles": {"p": {"snapshots": [snap]}}}
+    monkeypatch.setattr(restore, "create_remote", lambda spec: _fake_remote())
+    monkeypatch.setattr(restore, "sha256_file", lambda path: "d")
+    monkeypatch.setattr(
+        restore.send,
+        "restore_stream",
+        lambda *a, **k: pytest.fail("must not receive a corrupt stream"),
+    )
+
+    with pytest.raises(restore.BtrbakError, match=message):
+        restore.restore(_restore_cfg(), "p", "sid", target, meta, tmp_path)
+
+    assert not target.exists()
+    assert not (tmp_path / "target").exists()
+    assert list(tmp_path.glob("*.send")) == []
+
+
+def test_restore_does_not_create_target_when_the_download_fails(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+
+    class _Offline:
+        def read(self, remote_path, local_dest):
+            raise restore.BtrbakError("network down")
+
+    meta = {
+        "version": 1,
+        "profiles": {
+            "p": {
+                "snapshots": [
+                    {
+                        "id": "sid",
+                        "type": "full",
+                        "parent": None,
+                        "file": "p/sid.send",
+                        "sha256": "d",
+                        "size": 1,
+                        "uploads": [{"remote": "r", "status": "complete"}],
+                    }
+                ]
+            }
+        },
+    }
+    monkeypatch.setattr(restore, "is_btrfs", lambda path: True)
+    monkeypatch.setattr(restore, "create_remote", lambda spec: _Offline())
+
+    with pytest.raises(restore.BtrbakError, match="network down"):
+        restore.restore(_restore_cfg(), "p", "sid", target, meta, tmp_path)
+
+    assert not target.exists()
+
+
+def test_restore_downloads_the_first_link_exactly_once(tmp_path, monkeypatch):
+    """The pre-flight fetch is reused for that link, not repeated."""
+    target = tmp_path / "target"
+    monkeypatch.setattr(restore, "is_btrfs", lambda path: True)
+    reads = []
+
+    class _Counting:
+        def read(self, remote_path, local_dest):
+            reads.append(remote_path)
+            local_dest.write_bytes(b"x")
+
+    monkeypatch.setattr(restore, "create_remote", lambda spec: _Counting())
+    monkeypatch.setattr(restore, "sha256_file", lambda path: "d")
+    received = []
+    monkeypatch.setattr(
+        restore.send,
+        "restore_stream",
+        lambda f, t, c, e: received.append(Path(f).name),
+    )
+
+    restore.restore(_restore_cfg(), "p", "s2", target, _chain_meta(), tmp_path)
+
+    assert reads == ["p/s1.send", "p/s2.send"]
+    assert received == ["s1.send", "s2.send"]
+
+
+def test_restore_cleans_up_the_staged_links(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    monkeypatch.setattr(restore, "is_btrfs", lambda path: True)
+    _patch_restore(monkeypatch)
+
+    restore.restore(_restore_cfg(), "p", "s2", target, _chain_meta(), tmp_path)
+
+    assert list(tmp_path.glob("*.send")) == []
+
+
 # --- resumable restore ------------------------------------------------------
 
 

@@ -8,6 +8,7 @@ as root and btrfs tooling is available.
 import os
 import shutil
 import subprocess
+from dataclasses import replace
 
 import pytest
 
@@ -410,6 +411,38 @@ def test_restore_resumes_into_a_recovered_target(btrfs_fs, monkeypatch):
     restore.run_restore(cfg, "daily", full_id, target)
     assert (target / full_id / "a.txt").read_text() == "a\n"
     assert not (cfg.tmpdir / cfg.name / "restore").exists()
+
+
+def test_restore_rejects_a_corrupt_stream_without_creating_the_target(
+    btrfs_fs, monkeypatch
+):
+    """Integrity is checked before the target exists, so nothing is left behind.
+
+    Everything else in the chain is validated from the manifest up front; the
+    stream's own checksum can only be checked by fetching it, and discovering
+    that it is bad must not leave an empty target directory behind.
+    """
+    mnt = btrfs_fs
+    src, snapshots, _target = _setup(mnt, "corrupt")
+    remote_root = mnt / "corrupt" / "remote"
+    tmpdir = mnt / "corrupt" / "tmp"
+    remote_root.mkdir()
+    tmpdir.mkdir()
+    cfg = _pipeline_cfg(mnt, "corrupt", src, snapshots, remote_root, tmpdir)
+
+    (src / "a.txt").write_text("a\n")
+    monkeypatch.setattr(cli.util, "now", lambda: 0)
+    cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False)
+    snap_id = manifest.snapshots(manifest.load(snapshots / "meta.yaml"), "daily")[0]["id"]
+
+    send_file = remote_root / "daily" / f"{snap_id}.send"
+    send_file.write_bytes(send_file.read_bytes() + b"tampered")
+
+    target = mnt / "corrupt" / "fresh-target"
+    with pytest.raises(restore.BtrbakError, match="checksum mismatch"):
+        restore.run_restore(cfg, "daily", snap_id, target)
+
+    assert not target.exists()
 
 
 def test_verify_leaves_no_staging_directory(btrfs_fs, monkeypatch):
