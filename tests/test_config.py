@@ -252,6 +252,43 @@ def test_config_path_for_subvol_missing(tmp_path, monkeypatch):
         config.config_path_for_subvol("nope")
 
 
+@pytest.mark.parametrize(
+    "subvol",
+    [
+        "/etc/other/config",
+        "../../../../tmp/x/y",
+        "..",
+        ".",
+        "a/b",
+        "sub vol",
+        "",
+        "with\x00null",
+        "-leading-dash",
+    ],
+)
+def test_config_path_for_subvol_rejects_a_path(tmp_path, monkeypatch, subvol):
+    """A SUBVOL is one path component inside CONFIG_DIR, never a path.
+
+    Without this the selector concatenated straight onto CONFIG_DIR, so an
+    absolute path or a `..` sequence loaded an arbitrary file as a profile.
+    """
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    # Plant a real config outside CONFIG_DIR that the traversal would reach.
+    outside = tmp_path.parent / "escaped"
+    outside.mkdir(exist_ok=True)
+    (outside / "x.yaml").write_text("src: /x\n")
+    (tmp_path).mkdir(exist_ok=True)
+    with pytest.raises(config.ConfigError, match="invalid subvol|a single name"):
+        config.config_path_for_subvol(subvol)
+
+
+def test_config_path_for_subvol_still_accepts_dots(tmp_path, monkeypatch):
+    """Dots and dashes are legal as long as the name does not start with one."""
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    (tmp_path / "my.data_1-2.yaml").write_text("src: /x\n")
+    assert config.config_path_for_subvol("my.data_1-2") == tmp_path / "my.data_1-2.yaml"
+
+
 def test_discover_configs_prefers_yaml_over_yml(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
     _write(
@@ -644,3 +681,38 @@ def test_empty_tmpdir_still_falls_back_to_default(tmp_path):
         },
     )
     assert config.load_config(cfg_file, {}).tmpdir == config.DEFAULT_TMPDIR
+
+
+def test_validate_warns_when_encryption_has_no_identity(tmp_path, monkeypatch):
+    """Backing up works without an identity; restoring never can.
+
+    The warning belongs here so an admin finds out at configuration time
+    rather than during a recovery.
+    """
+    cfg = _validate_cfg(tmp_path, tmp_path / "src")
+    cfg.encryption = {"algorithm": "age", "recipients": ["age1abc"], "identity": None}
+    monkeypatch.setattr(config, "which", lambda binary: True)
+    monkeypatch.setattr(config, "age_recipient_error", lambda recipient: None)
+
+    _errors, warnings = config.validate(cfg, check_remotes=False)
+    assert any(
+        "'encryption.identity' is not set" in warning and "never be restored" in warning
+        for warning in warnings
+    )
+
+
+def test_validate_does_not_warn_when_an_identity_is_set(tmp_path, monkeypatch):
+    cfg = _validate_cfg(tmp_path, tmp_path / "src")
+    identity = tmp_path / "id.key"
+    identity.write_text("")
+    identity.chmod(0o600)
+    cfg.encryption = {
+        "algorithm": "age",
+        "recipients": ["age1abc"],
+        "identity": str(identity),
+    }
+    monkeypatch.setattr(config, "which", lambda binary: True)
+    monkeypatch.setattr(config, "age_recipient_error", lambda recipient: None)
+
+    _errors, warnings = config.validate(cfg, check_remotes=False)
+    assert not any("never be restored" in warning for warning in warnings)

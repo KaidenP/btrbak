@@ -32,6 +32,26 @@ DEFAULT_TMPDIR = Path("/var/tmp/btrbak")
 # conservative, filesystem-safe character set with no separators at all.
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+# The SUBVOL selector is the config file's own stem, so it gets exactly the
+# same treatment: a selector is one path component inside CONFIG_DIR, never a
+# path. Without this, `btrbak list /etc/other/config` or `btrbak list
+# ../../../tmp/x/y` would concatenate out of CONFIG_DIR and load an arbitrary
+# file as a profile.
+SUBVOL_NAME_RE = PROFILE_NAME_RE
+
+_NAME_HINT = (
+    "use letters, digits, '.', '_' or '-' and start with a letter or digit"
+)
+
+
+def _validate_subvol_name(subvol) -> None:
+    """Reject a SUBVOL selector that is not one safe path component."""
+    if not _is_safe_name(subvol):
+        raise ConfigError(
+            f"invalid subvol {subvol!r}: a SUBVOL is a single name, not a path; "
+            f"{_NAME_HINT}"
+        )
+
 
 class ConfigError(Exception):
     """Raised for invalid configuration."""
@@ -92,12 +112,15 @@ def _parse_tmpdir(value) -> Path:
 
 def _validate_profile_name(name, path) -> None:
     """Reject profile names that are unsafe as a path component."""
-    text = str(name)
-    if not PROFILE_NAME_RE.match(text) or text in (".", ".."):
+    if not _is_safe_name(name):
         raise ConfigError(
-            f"{path}: profile name {name!r} is not allowed; use letters, digits, "
-            "'.', '_' or '-' and start with a letter or digit"
+            f"{path}: profile name {name!r} is not allowed; {_NAME_HINT}"
         )
+
+
+def _is_safe_name(name) -> bool:
+    text = str(name)
+    return bool(SUBVOL_NAME_RE.match(text)) and text not in (".", "..")
 
 
 def _require_absolute(value, label: str, path) -> None:
@@ -204,7 +227,14 @@ def discover_configs_tolerant(subvol=None) -> list[tuple[Path, Config | None, Co
 
 
 def config_path_for_subvol(subvol) -> Path:
-    """Resolve a SUBVOL selector to a config file (``.yaml`` or ``.yml``)."""
+    """Resolve a SUBVOL selector to a config file (``.yaml`` or ``.yml``).
+
+    The selector is validated as a single safe path component first, so it
+    can only ever name a file directly inside :data:`CONFIG_DIR` -- it cannot
+    carry a separator, an absolute path or a ``..`` sequence that would read a
+    config from somewhere else entirely.
+    """
+    _validate_subvol_name(subvol)
     for ext in (".yaml", ".yml"):
         path = CONFIG_DIR / f"{subvol}{ext}"
         if path.exists():
@@ -436,6 +466,15 @@ def validate(config: Config, check_remotes=True, check_nesting=True):
         if config.encryption["identity"]:
             _check_permissions(
                 config.encryption["identity"], "age identity file", warnings
+            )
+        else:
+            # Sending needs only recipients; restoring needs the private
+            # identity, so a profile without one backs up cleanly and can
+            # never be restored anywhere. Worth saying out loud now rather
+            # than discovering it during a recovery.
+            warnings.append(
+                "encryption is enabled but 'encryption.identity' is not set; "
+                "backups will be written but can never be restored"
             )
         for recipient in config.encryption["recipients"]:
             problem = age_recipient_error(recipient)
