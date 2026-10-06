@@ -16,6 +16,7 @@ import yaml
 from . import timespan
 from .remotes import create_remote
 from .util import (
+    AGE_MISSING_ERROR,
     age_recipient_error,
     is_nested,
     is_subvolume,
@@ -403,6 +404,15 @@ def _require_absolute_recipient(recipient, path) -> None:
 # --- validation ------------------------------------------------------------
 
 
+def _config_uses_auth(config: Config) -> bool:
+    """Return True when any configured remote references an ``auth`` key."""
+    return any(
+        "auth" in remote.settings
+        for profile in config.profiles.values()
+        for remote in profile.remotes
+    )
+
+
 def validate(config: Config, check_remotes=True, check_nesting=True):
     """Return ``(errors, warnings)`` for a config.
 
@@ -444,7 +454,8 @@ def validate(config: Config, check_remotes=True, check_nesting=True):
 
     _check_creatable(config.tmpdir, "tmpdir", errors)
     _check_creatable(config.dest, "dest", errors)
-    _check_permissions(AUTH_PATH, "auth.yaml", warnings)
+    if _config_uses_auth(config):
+        _check_permissions(AUTH_PATH, "auth.yaml", warnings)
 
     for profile in config.profiles.values():
         if not timespan.is_never(profile.freq_incr) and profile.keep < profile.freq_incr:
@@ -461,7 +472,8 @@ def validate(config: Config, check_remotes=True, check_nesting=True):
                 errors.append(f"profile {profile.name}: remote {remote.id}: {exc}")
 
     if config.encryption and config.encryption["algorithm"] == "age":
-        if not which("age"):
+        age_available = which("age")
+        if not age_available:
             errors.append("encryption is enabled but the 'age' binary was not found")
         if config.encryption["identity"]:
             _check_permissions(
@@ -478,7 +490,11 @@ def validate(config: Config, check_remotes=True, check_nesting=True):
             )
         for recipient in config.encryption["recipients"]:
             problem = age_recipient_error(recipient)
-            if problem is not None:
+            # A missing `age` binary has already been reported once above;
+            # don't echo the same fact once per recipient.
+            if problem is not None and not (
+                not age_available and problem == AGE_MISSING_ERROR
+            ):
                 errors.append(f"age recipient is invalid: {recipient!r}: {problem}")
 
     return errors, warnings

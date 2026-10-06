@@ -716,3 +716,34 @@ def test_validate_does_not_warn_when_an_identity_is_set(tmp_path, monkeypatch):
 
     _errors, warnings = config.validate(cfg, check_remotes=False)
     assert not any("never be restored" in warning for warning in warnings)
+
+
+def test_validate_reports_missing_age_once_per_config(tmp_path, monkeypatch):
+    """The generic age-missing error and the per-recipient copy must not stack."""
+    cfg = _validate_cfg(tmp_path, tmp_path / "src")
+    cfg.encryption = {"algorithm": "age", "recipients": ["age1abc"], "identity": None}
+    monkeypatch.setattr(config, "which", lambda binary: binary != "age")
+    monkeypatch.setattr(
+        config, "age_recipient_error", lambda recipient: config.AGE_MISSING_ERROR
+    )
+
+    errors, _warnings = config.validate(cfg, check_remotes=False)
+    age_errors = [error for error in errors if "age" in error and "binary" in error]
+    assert len(age_errors) == 1
+
+
+def test_validate_warns_auth_permissions_only_when_auth_is_used(tmp_path, monkeypatch):
+    auth = tmp_path / "auth.yaml"
+    auth.write_text("")
+    auth.chmod(0o644)
+    monkeypatch.setattr(config, "AUTH_PATH", auth)
+
+    cfg = _validate_cfg(tmp_path, tmp_path / "src")
+    _errors, warnings = config.validate(cfg, check_remotes=False)
+    assert not any("auth.yaml" in warning for warning in warnings)
+
+    cfg.profiles["daily"].remotes.append(
+        config.RemoteSpec("r", "dir", {"type": "dir", "path": "/x", "auth": {"k": "v"}})
+    )
+    _errors, warnings = config.validate(cfg, check_remotes=False)
+    assert any("auth.yaml" in warning and "0600" in warning for warning in warnings)

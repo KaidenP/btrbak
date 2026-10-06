@@ -16,6 +16,11 @@ class BtrbakError(Exception):
     """Base class for expected, user-facing failures."""
 
 
+#: Returned by :func:`age_recipient_error` (and compared against in
+#: :mod:`btrbak.config`) when the ``age`` binary is not installed.
+AGE_MISSING_ERROR = "the 'age' binary was not found"
+
+
 # Scratch subdirectories under ``<tmpdir>/<SUBVOL>/`` used by ``verify`` and
 # ``restore`` for their downloads. The leading dot namespaces them away from
 # the per-profile staging directories, whose names come from the profile name
@@ -359,7 +364,7 @@ def age_recipient_error(recipient) -> str | None:
             cmd, input=b"", stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
         )
     except FileNotFoundError:
-        return "the 'age' binary was not found"
+        return AGE_MISSING_ERROR
     if proc.returncode == 0:
         return None
     stderr = proc.stderr.decode("utf-8", "replace").strip()
