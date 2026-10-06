@@ -30,6 +30,11 @@ def parse(value) -> int:
     """Parse a timespan into a number of seconds.
 
     Returns :data:`NEVER` for ``-1``.
+
+    A bare positive integer is accepted as a number of *seconds* (not a unit
+    quantity); the string form of the same number (e.g. ``"3600"``) is
+    rejected. This asymmetry is historical and retained for compatibility with
+    existing configs.
     """
     if isinstance(value, bool):
         raise ValueError(f"invalid timespan: {value!r}")

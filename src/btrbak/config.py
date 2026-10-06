@@ -100,6 +100,8 @@ def load_auth(path=None) -> dict:
             data = yaml.safe_load(handle) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"invalid YAML in {path}: {exc}")
+    except (UnicodeDecodeError, OSError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}")
     if not isinstance(data, dict):
         raise ConfigError(f"auth file must be a mapping: {path}")
     return data
@@ -114,6 +116,8 @@ def _parse_tmpdir(value) -> Path:
 
 def _validate_profile_name(name, path) -> None:
     """Reject profile names that are unsafe as a path component."""
+    if not isinstance(name, str):
+        raise ConfigError(f"{path}: profile names must be strings, not {name!r}")
     if not _is_safe_name(name):
         raise ConfigError(
             f"{path}: profile name {name!r} is not allowed; {_NAME_HINT}"
@@ -121,9 +125,13 @@ def _validate_profile_name(name, path) -> None:
 
 
 def _is_safe_name(name) -> bool:
-    # The pattern already requires an alphanumeric first character, so '.'
-    # and '..' can never match.
-    return bool(SUBVOL_NAME_RE.match(str(name)))
+    if not isinstance(name, str):
+        return False
+    # fullmatch (not match): ``match`` anchors with ``$``, which in Python also
+    # matches just before a trailing newline, so ``"abc\n"`` would slip through.
+    # The pattern already requires an alphanumeric first character, so '.',
+    # '..' and the empty string can never match.
+    return bool(SUBVOL_NAME_RE.fullmatch(name))
 
 
 def _require_absolute(value, label: str, path) -> None:
@@ -133,6 +141,8 @@ def _require_absolute(value, label: str, path) -> None:
     directory otherwise, which silently makes behaviour depend on where the
     tool happened to be invoked from (a systemd unit's WorkingDirectory).
     """
+    if not isinstance(value, (str, os.PathLike)):
+        raise ConfigError(f"{path}: '{label}' must be a string path, not {value!r}")
     if not Path(value).expanduser().is_absolute():
         raise ConfigError(f"{path}: '{label}' must be an absolute path: {value}")
 
@@ -144,6 +154,8 @@ def load_config(path, auth: dict) -> Config:
             data = yaml.safe_load(handle)
     except yaml.YAMLError as exc:
         raise ConfigError(f"invalid YAML in {path}: {exc}")
+    except (UnicodeDecodeError, OSError) as exc:
+        raise ConfigError(f"cannot read config {path}: {exc}")
     if not isinstance(data, dict):
         raise ConfigError(f"config must be a mapping: {path}")
 
@@ -185,16 +197,35 @@ def discover_config_paths(subvol=None) -> list[Path]:
         return [config_path_for_subvol(subvol)]
     if not CONFIG_DIR.is_dir():
         raise ConfigError(f"config directory not found: {CONFIG_DIR}")
+    conf_dir = CONFIG_DIR.resolve()
     # Prefer <name>.yaml over <name>.yml when both exist for the same subvol.
     by_stem = {}
     for path in CONFIG_DIR.glob("*.yaml"):
-        by_stem[path.stem] = path
+        if _is_confined_config_file(path, conf_dir):
+            by_stem[path.stem] = path
     for path in CONFIG_DIR.glob("*.yml"):
-        by_stem.setdefault(path.stem, path)
+        if _is_confined_config_file(path, conf_dir):
+            by_stem.setdefault(path.stem, path)
     paths = sorted(by_stem.values(), key=lambda p: p.name)
     if not paths:
         raise ConfigError(f"no config files found in {CONFIG_DIR}")
     return paths
+
+
+def _is_confined_config_file(path: Path, conf_dir: Path) -> bool:
+    """Return True when *path* is a regular file resolving inside *conf_dir*.
+
+    Directories named ``*.yaml`` are skipped (they would otherwise surface as
+    an ``IsADirectoryError`` later), and symlinks whose target escapes the
+    config directory are ignored so a local user cannot substitute an
+    arbitrary file as a profile.
+    """
+    if not path.is_file():
+        return False
+    try:
+        return path.resolve().parent == conf_dir
+    except OSError:
+        return False
 
 
 def discover_configs_tolerant(subvol=None) -> list[tuple[Path, Config | None, ConfigError | None]]:
@@ -212,20 +243,22 @@ def discover_configs_tolerant(subvol=None) -> list[tuple[Path, Config | None, Co
     paths = discover_config_paths(subvol)
     try:
         auth = load_auth()
+        auth_error = None
     except ConfigError as exc:
         auth, auth_error = {}, exc
-    else:
-        auth_error = None
 
     results = []
     for path in paths:
-        if auth_error is not None:
-            results.append((path, None, auth_error))
-            continue
         try:
             results.append((path, load_config(path, auth), None))
         except ConfigError as exc:
             results.append((path, None, exc))
+
+    # Report a broken auth.yaml exactly once instead of masking every profile:
+    # configs that don't reference auth still load, and configs that do get a
+    # precise per-config "auth key not found" error above.
+    if auth_error is not None:
+        results.append((Path(AUTH_PATH), None, auth_error))
     return results
 
 
@@ -241,6 +274,10 @@ def config_path_for_subvol(subvol) -> Path:
     for ext in (".yaml", ".yml"):
         path = CONFIG_DIR / f"{subvol}{ext}"
         if path.is_file():
+            if path.resolve().parent != CONFIG_DIR.resolve():
+                raise ConfigError(
+                    f"config path for subvol {subvol!r} escapes {CONFIG_DIR}: {path}"
+                )
             return path
         if path.exists():
             # Without this, a directory named <subvol>.yaml would surface as
@@ -279,6 +316,9 @@ def select_profile_names(config: Config, names) -> Config:
     """Return *config* restricted to *names*, or unchanged when *names* is empty."""
     if not names:
         return config
+    missing = [name for name in names if name not in config.profiles]
+    if missing:
+        raise ConfigError(f"unknown profile(s): {', '.join(map(str, missing))}")
     return replace(config, profiles={name: config.profiles[name] for name in names})
 
 
@@ -297,6 +337,8 @@ def load_groups(path=None) -> dict[str, list[tuple[str, str | None]]]:
             data = yaml.safe_load(handle)
     except yaml.YAMLError as exc:
         raise ConfigError(f"invalid YAML in {path}: {exc}")
+    except (UnicodeDecodeError, OSError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}")
     if data is None:
         return {}
     if not isinstance(data, dict):
@@ -315,6 +357,8 @@ def load_groups(path=None) -> dict[str, list[tuple[str, str | None]]]:
 
 
 def _validate_group_name(name, path) -> None:
+    if not isinstance(name, str):
+        raise ConfigError(f"{path}: group names must be strings, not {name!r}")
     if not _is_safe_name(name):
         raise ConfigError(
             f"{path}: group name {name!r} is not allowed; {_NAME_HINT}"
@@ -352,7 +396,17 @@ def _parse_group_member(member, path, group) -> tuple[str, str | None]:
 def _parse_profile(name, praw, auth, path) -> Profile:
     freq = praw.get("freq")
     if not isinstance(freq, dict):
-        raise ConfigError(f"{path}: profile {name!r}: 'freq' is required")
+        raise ConfigError(
+            f"{path}: profile {name!r}: 'freq' must be a mapping with 'full' and 'incr'"
+        )
+    missing = [key for key in ("full", "incr") if key not in freq]
+    if missing:
+        raise ConfigError(
+            f"{path}: profile {name!r}: 'freq' is missing required key(s): "
+            f"{', '.join(missing)}"
+        )
+    if "keep" not in praw:
+        raise ConfigError(f"{path}: profile {name!r}: 'keep' is required")
     try:
         freq_full = timespan.parse(freq.get("full"))
         freq_incr = timespan.parse(freq.get("incr"))
@@ -363,7 +417,9 @@ def _parse_profile(name, praw, auth, path) -> Profile:
     if timespan.is_never(keep):
         raise ConfigError(f"{path}: profile {name!r}: 'keep' cannot be -1")
 
-    remotes_raw = praw.get("remotes") or []
+    remotes_raw = praw.get("remotes")
+    if remotes_raw is None:
+        remotes_raw = []
     if not isinstance(remotes_raw, list):
         raise ConfigError(f"{path}: profile {name!r}: 'remotes' must be a list")
 
@@ -391,11 +447,16 @@ def _parse_remote(entry, auth, path, profile) -> RemoteSpec:
 
     resolved = dict(entry)
     rtype = resolved.get("type")
-    if not rtype:
-        raise ConfigError(f"{path}: profile {profile!r}: remote requires 'type'")
+    if not isinstance(rtype, str) or not rtype:
+        raise ConfigError(f"{path}: profile {profile!r}: remote requires a string 'type'")
 
     if "auth" in resolved:
         key = resolved["auth"]
+        if not isinstance(key, str):
+            raise ConfigError(
+                f"{path}: profile {profile!r}: remote 'auth' must be a string key, "
+                f"not {key!r}"
+            )
         if key not in auth:
             raise ConfigError(
                 f"{path}: profile {profile!r}: auth key {key!r} not found in auth.yaml"
@@ -403,16 +464,21 @@ def _parse_remote(entry, auth, path, profile) -> RemoteSpec:
         resolved["auth"] = auth[key]
 
     name = resolved.get("name")
-    if name is None:
+    if name:
+        if not isinstance(name, str):
+            raise ConfigError(
+                f"{path}: profile {profile!r}: remote 'name' must be a string, "
+                f"not {name!r}"
+            )
+        rid = name
+    else:
         canonical = {k: v for k, v in resolved.items() if k not in ("auth", "name")}
         digest = hashlib.sha256(
             json.dumps(canonical, sort_keys=True, default=str).encode()
         ).hexdigest()[:16]
         rid = f"hash:{digest}"
-    else:
-        rid = str(name)
 
-    return RemoteSpec(id=rid, type=str(rtype), settings=resolved)
+    return RemoteSpec(id=rid, type=rtype, settings=resolved)
 
 
 def remote_identity(spec) -> str:
@@ -538,6 +604,9 @@ def validate(config: Config, check_remotes=True, check_nesting=True):
     _check_creatable(config.tmpdir, "tmpdir", errors)
     _check_creatable(config.dest, "dest", errors)
     if _config_uses_auth(config):
+        # NOTE: the warning uses the module-default AUTH_PATH; a custom path
+        # passed to load_auth() is not threaded through here. Advisory only --
+        # GdriveRemote enforces 0600 on the token it actually opens (BTR-012).
         _check_permissions(AUTH_PATH, "auth.yaml", warnings)
 
     for profile in config.profiles.values():
@@ -629,6 +698,9 @@ def _same_path(a, b) -> bool:
 
 
 def _check_creatable(path: Path, label: str, errors: list[str]) -> None:
+    # os.access(W_OK) reports success for root even on read-only mounts, so
+    # this is a heuristic (the real failure surfaces mid-run); keep it but
+    # don't treat it as authoritative.
     if path.exists():
         if not path.is_dir():
             errors.append(f"{label} is not a directory: {path}")

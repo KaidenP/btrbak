@@ -171,19 +171,36 @@ def test_invalid_yaml_raises_config_error(tmp_path):
         config.load_config(cfg_file, {})
 
 
-def test_compression_bool_level_rejected(tmp_path):
+@pytest.mark.parametrize("level", [True, -1, 10, "six", 6.5, None])
+def test_compression_invalid_level_rejected(tmp_path, level):
     cfg_file = tmp_path / "root.yaml"
     _write(
         cfg_file,
         {
             "src": "/mnt/data",
             "dest": "/mnt/data/.snapshots",
-            "compression": {"algorithm": "xz", "level": True},
+            "compression": {"algorithm": "xz", "level": level},
             "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
         },
     )
     with pytest.raises(config.ConfigError):
         config.load_config(cfg_file, {})
+
+
+@pytest.mark.parametrize("level", [0, 9])
+def test_compression_valid_level_accepted(tmp_path, level):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": "/mnt/data",
+            "dest": "/mnt/data/.snapshots",
+            "compression": {"algorithm": "xz", "level": level},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        },
+    )
+    cfg = config.load_config(cfg_file, {})
+    assert cfg.compression["level"] == level
 
 
 def test_filter_profiles(tmp_path):
@@ -449,7 +466,7 @@ def test_discover_configs_tolerant_discovery_failure_still_raises(tmp_path, monk
         config.discover_configs_tolerant()
 
 
-def test_discover_configs_tolerant_reports_bad_auth_for_every_config(tmp_path, monkeypatch):
+def test_discover_configs_tolerant_reports_bad_auth_once(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "profiles.d")
     (tmp_path / "profiles.d").mkdir()
     auth = tmp_path / "auth.yaml"
@@ -458,10 +475,14 @@ def test_discover_configs_tolerant_reports_bad_auth_for_every_config(tmp_path, m
     _write(tmp_path / "profiles.d" / "aaa.yaml", _minimal_profile())
     _write(tmp_path / "profiles.d" / "bbb.yaml", _minimal_profile())
     results = config.discover_configs_tolerant()
-    assert [cfg for _, cfg, _ in results] == [None, None]
-    assert all(
-        "auth file must be a mapping" in str(error) for _, _, error in results
-    )
+    # Auth-free profiles still load; the broken auth.yaml is reported once as
+    # a trailing triple rather than masking every config.
+    assert [cfg is not None for _path, cfg, _error in results[:2]] == [True, True]
+    errors = [error for _path, _cfg, error in results]
+    assert errors[:2] == [None, None]
+    assert errors[2] is not None
+    assert "auth file must be a mapping" in str(errors[2])
+    assert results[2][0] == auth
 
 
 def test_remote_identity_distinguishes_settings():
@@ -786,3 +807,37 @@ def test_load_groups_rejects_bad_names(tmp_path):
     _write(path, {"apt": ["root:bad/profile"]})
     with pytest.raises(config.ConfigError):
         config.load_groups(path)
+
+
+def test_validate_surfaces_unreachable_remote(tmp_path, monkeypatch):
+    """`check_remotes=True` must fail fast when an offsite is unreachable."""
+    from btrbak.remotes.base import RemoteError
+
+    cfg = _validate_cfg(tmp_path, tmp_path / "dest")
+    cfg.profiles["daily"].remotes.append(
+        config.RemoteSpec("offsite", "dir", {"type": "dir", "path": "/x"})
+    )
+
+    class _Unreachable:
+        def validate(self):
+            raise RemoteError("cannot reach offsite")
+
+    monkeypatch.setattr(config, "create_remote", lambda spec: _Unreachable())
+    errors, _warnings = config.validate(cfg, check_remotes=True)
+    assert any("remote offsite: cannot reach offsite" in e for e in errors)
+
+
+def test_load_auth_missing_file_returns_empty(tmp_path):
+    assert config.load_auth(tmp_path / "missing.yaml") == {}
+
+
+def test_load_auth_valid_mapping(tmp_path):
+    _write(tmp_path / "auth.yaml", {"offsite": {"token": "/t"}})
+    assert config.load_auth(tmp_path / "auth.yaml") == {"offsite": {"token": "/t"}}
+
+
+def test_load_auth_non_mapping_raises(tmp_path):
+    path = tmp_path / "auth.yaml"
+    _write(path, ["not", "a", "mapping"])
+    with pytest.raises(config.ConfigError, match="must be a mapping"):
+        config.load_auth(path)
