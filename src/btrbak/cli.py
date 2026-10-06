@@ -35,6 +35,12 @@ def main(argv=None) -> int:
 
     try:
         return args.func(args)
+    except KeyboardInterrupt:
+        # 130 is the conventional shell status for SIGINT. Handled here so a
+        # Ctrl-C during, say, the nesting grace period aborts quietly instead
+        # of dumping a traceback.
+        print("\nbtrbak: interrupted", file=sys.stderr)
+        return 130
     except config_mod.ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2

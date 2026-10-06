@@ -1478,6 +1478,14 @@ def test_main_rejects_non_root(monkeypatch, capsys):
     assert "must be run as root" in capsys.readouterr().err
 
 
+def test_main_handles_ctrl_c_without_a_traceback(monkeypatch, capsys):
+    """Ctrl-C (e.g. during the nesting grace period) aborts with status 130."""
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cli, "cmd_run", _raise(KeyboardInterrupt()))
+    assert cli.main(["run"]) == 130
+    assert "interrupted" in capsys.readouterr().err
+
+
 def test_main_reports_malformed_manifest_cleanly(monkeypatch, tmp_path, capsys):
     """A hand-edited meta.yaml must surface as a clean error, not a traceback."""
     cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
