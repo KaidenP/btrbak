@@ -52,11 +52,16 @@ def _codec_level(compression) -> int:
     """
     level = compression.get("level", 6)
     try:
-        return int(level)
+        value = int(level)
     except (TypeError, ValueError) as exc:
         raise BtrbakError(
             f"invalid xz compression level {level!r}; expected an integer 0-9"
         ) from exc
+    if not 0 <= value <= 9:
+        raise BtrbakError(
+            f"invalid xz compression level {level!r}; expected an integer 0-9"
+        )
+    return value
 
 
 def compress_file(src, dst, preset: int = 6) -> None:
@@ -65,7 +70,7 @@ def compress_file(src, dst, preset: int = 6) -> None:
             raw_sink, "wb", format=lzma.FORMAT_XZ, preset=preset
         ) as sink:
             shutil.copyfileobj(source, sink)
-    except lzma.LZMAError as exc:
+    except (lzma.LZMAError, ValueError, OverflowError) as exc:
         raise BtrbakError(f"xz compression failed: {exc}") from exc
 
 
@@ -124,6 +129,9 @@ def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None)
             compressed = work / (out_path.name + ".xz")
             intermediates.append(compressed)
             compress_file(current, compressed, level)
+            # Free the raw stream as soon as it is compressed; holding raw +
+            # xz + final simultaneously can approach ~3x the backup size.
+            current.unlink(missing_ok=True)
             current = compressed
 
         if use_age:
@@ -147,6 +155,8 @@ def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None)
                     )
             age_cmd += ["-o", str(out_path), str(current)]
             _run_private_output(age_cmd)
+            # Free the pre-encryption stream as soon as the ciphertext exists.
+            current.unlink(missing_ok=True)
         else:
             os.replace(current, out_path)
     finally:
@@ -182,7 +192,7 @@ def restore_stream(send_file, target, compression=None, encryption=None) -> None
             current = decompressed
 
         with open(current, "rb") as handle:
-            run(["btrfs", "receive", str(target)], stdin=handle)
+            run(["btrfs", "receive", "--", str(target)], stdin=handle)
     finally:
         for path in intermediates:
             path.unlink(missing_ok=True)

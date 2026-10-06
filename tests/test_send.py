@@ -228,3 +228,88 @@ def test_age_output_is_created_under_a_restrictive_umask(tmp_path, monkeypatch):
     after = os.umask(before)
     assert after == before
     assert out.stat().st_mode & 0o777 == 0o600
+
+
+# --- incremental send must actually pass -p --------------------------------
+#
+# `-p <parent>` is the whole mechanism that makes incremental backups
+# incremental; if the flag were dropped or the arguments swapped, every
+# incremental would silently become a full send.
+
+
+def test_send_snapshot_incremental_uses_parent_flag(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, stdout=None, stdin=None, check=True):
+        captured["cmd"] = cmd
+        if stdout is not None:
+            stdout.write(b"fake stream")
+        return None
+
+    monkeypatch.setattr(send, "run", fake_run)
+
+    snap = tmp_path / "snap"
+    parent = tmp_path / "parent"
+    snap.mkdir()
+    parent.mkdir()
+    out = tmp_path / "staging" / "out.send"
+
+    send.send_snapshot(snap, parent, out)
+
+    assert captured["cmd"] == ["btrfs", "send", "-p", str(parent), str(snap)]
+
+
+# --- restore-side decryption -----------------------------------------------
+
+
+def test_restore_stream_requires_identity_to_decrypt(tmp_path):
+    import pytest
+
+    from btrbak.util import BtrbakError
+
+    send_file = tmp_path / "in.send"
+    send_file.write_bytes(b"ciphertext")
+    with pytest.raises(BtrbakError, match="identity is required"):
+        send.restore_stream(
+            send_file,
+            tmp_path,
+            encryption={"algorithm": "age", "recipients": ["age1abc"], "identity": None},
+        )
+
+
+def test_restore_stream_decrypts_under_a_restrictive_umask(tmp_path, monkeypatch):
+    import os
+
+    captured = {}
+
+    def fake_run(cmd, stdout=None, stdin=None, check=True):
+        if cmd and cmd[0] == "age":
+            current = os.umask(0o077)
+            os.umask(current)
+            captured["umask"] = current
+            captured["age_cmd"] = cmd
+            out = cmd[cmd.index("-o") + 1]
+            fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.write(fd, b"plain")
+            os.close(fd)
+        return None
+
+    monkeypatch.setattr(send, "run", fake_run)
+
+    identity = tmp_path / "identity.txt"
+    identity.write_text("AGE-SECRET-KEY-1EXAMPLE\n")
+    send_file = tmp_path / "in.send"
+    send_file.write_bytes(b"ciphertext")
+
+    send.restore_stream(
+        send_file,
+        tmp_path,
+        encryption={
+            "algorithm": "age",
+            "recipients": ["age1abc"],
+            "identity": str(identity),
+        },
+    )
+
+    assert captured["age_cmd"][:4] == ["age", "-d", "-i", str(identity)]
+    assert captured["umask"] == 0o077

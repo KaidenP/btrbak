@@ -1,5 +1,6 @@
 """Restore: replay a full + incremental send chain into a btrfs target."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -83,15 +84,30 @@ def _resume_point(target: Path, chain: list[str], meta: dict, profile_name: str)
     subvolume and renames it into place only on success, so an interrupted
     receive leaves nothing at the snapshot id for this to match.
 
-    Raises :class:`BtrbakError` when the target holds a non-subvolume entry
-    under a snapshot id, or a subvolume with a different UUID, since either
-    would block ``btrfs receive`` or silently invalidate the chain.
+    A gap (a present link after a missing one), a symlink, or a non-subvolume
+    entry under a snapshot id all raise :class:`BtrbakError`, since each would
+    block ``btrfs receive`` or silently invalidate the chain.
     """
     by_id = manifest.snapshots_by_id(meta, profile_name)
+    resume_at = None
     for index, sid in enumerate(chain):
         entry = target / sid
-        if not entry.exists():
-            return index
+        present = os.path.lexists(entry)
+        if present and resume_at is not None:
+            raise BtrbakError(
+                f"restore target has a gap: {entry} is present but snapshot "
+                f"{chain[resume_at]} (earlier in the chain) is missing; "
+                "remove stray subvolumes before restoring"
+            )
+        if not present:
+            if resume_at is None:
+                resume_at = index
+            continue
+        if entry.is_symlink():
+            raise BtrbakError(
+                f"restore target contains {entry} which is a symlink; remove "
+                "it before restoring"
+            )
         if not is_subvolume(entry):
             raise BtrbakError(
                 f"restore target already contains {entry} which is not a btrfs "
@@ -106,7 +122,7 @@ def _resume_point(target: Path, chain: list[str], meta: dict, profile_name: str)
                 f"restore target already contains {entry} with UUID {actual or 'unknown'}, "
                 f"but snapshot {sid} is {expected}; remove it before restoring"
             )
-    return len(chain)
+    return resume_at if resume_at is not None else len(chain)
 
 
 def download_link(remote, snap: dict, tmpfile: Path) -> None:
@@ -118,9 +134,18 @@ def download_link(remote, snap: dict, tmpfile: Path) -> None:
     something the manifest never described.
     """
     remote.read(snap["file"], tmpfile)
-    if sha256_file(tmpfile) != snap.get("sha256"):
+    verify_download(snap, tmpfile)
+
+
+def verify_download(snap: dict, tmpfile: Path) -> None:
+    """Check a staged stream against the manifest's recorded hash/size.
+
+    A missing ``sha256`` or ``size`` (older or hand-edited manifest) skips the
+    corresponding check rather than reporting a spurious mismatch.
+    """
+    if snap.get("sha256") is not None and sha256_file(tmpfile) != snap.get("sha256"):
         raise BtrbakError(f"checksum mismatch for snapshot {snap['id']}")
-    if tmpfile.stat().st_size != snap.get("size"):
+    if snap.get("size") is not None and tmpfile.stat().st_size != snap.get("size"):
         raise BtrbakError(f"size mismatch for snapshot {snap['id']}")
 
 
@@ -140,20 +165,12 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
         spec.id: create_remote(spec) for spec in config.profiles[profile_name].remotes
     }
 
-    # Validate the whole chain, and the resume point, before creating the
-    # target: a rejected restore must never leave an empty directory behind.
-    # Every chain id is guaranteed present in by_id: build_chain just walked
-    # the same index and raised on anything missing.
-    for sid in chain:
-        snap = by_id[sid]
-        if snap.get("type") == "local":
-            raise BtrbakError(
-                f"snapshot {sid} is local-only and has no offsite copy; "
-                "restore it from the local dest instead"
-            )
-        if pick_remote(snap, remote_map) is None:
-            raise BtrbakError(f"no complete remote upload for snapshot {sid}")
-
+    # Validate the links still to be received, and the resume point, before
+    # creating the target: a rejected restore must never leave an empty
+    # directory behind, and a link already present (per _resume_point) must
+    # not block a resume just because its remote upload was removed. Every
+    # chain id is guaranteed present in by_id: build_chain just walked the
+    # same index and raised on anything missing.
     resume_at = _resume_point(target, chain, meta, profile_name)
     if resume_at:
         print(
@@ -162,6 +179,20 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
             file=sys.stderr,
         )
     pending = chain[resume_at:]
+
+    for sid in pending:
+        snap = by_id[sid]
+        if snap.get("type") == "local":
+            raise BtrbakError(
+                f"snapshot {sid} is local-only and has no offsite copy; "
+                "restore it from the local dest instead"
+            )
+        if not snap.get("file"):
+            raise BtrbakError(
+                f"snapshot {sid} has no 'file' recorded; cannot restore it"
+            )
+        if pick_remote(snap, remote_map) is None:
+            raise BtrbakError(f"no complete remote upload for snapshot {sid}")
 
     # Fetch and verify the first remaining link *before* the target exists.
     # Everything checkable from the manifest has been checked above; the one
@@ -191,6 +222,11 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
             try:
                 if index:
                     download_link(pick_remote(snap, remote_map), snap, tmpfile)
+                # Re-verify the staged bytes immediately before replay: the
+                # check in download_link applied at download time and a
+                # concurrent writer to the scratch dir must not substitute a
+                # different stream in between (BTR-014).
+                verify_download(snap, tmpfile)
                 compression, encryption = codec_for_snapshot(snap, config)
                 send.restore_stream(tmpfile, target, compression, encryption)
             finally:
@@ -201,6 +237,24 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
             staged.unlink(missing_ok=True)
 
 
+def _sweep_stale_scratch(tmpdir: Path) -> None:
+    """Remove stale download/decrypt intermediates from a previous run.
+
+    These are only cleaned by ``finally`` blocks, so an unclean termination
+    (SIGKILL, power loss) can leave decrypted plaintext behind; sweep it at
+    the start of every restore instead of waiting for ``run``'s 24 h tmpdir
+    sweeper.
+    """
+    if not tmpdir.is_dir():
+        return
+    for pattern in ("*.send", "*.dec", "*.decx"):
+        for stale in tmpdir.glob(pattern):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+
 def run_restore(config, profile_name, snapshot_id, target) -> None:
     if profile_name not in config.profiles:
         raise BtrbakError(f"unknown profile: {profile_name}")
@@ -208,20 +262,38 @@ def run_restore(config, profile_name, snapshot_id, target) -> None:
     with scratch_dir(
         config.tmpdir / config.name / RESTORE_SCRATCH, config.tmpdir
     ) as tmpdir:
+        _sweep_stale_scratch(tmpdir)
         meta = load_meta_for_restore(config, profile_name, tmpdir)
         restore(config, profile_name, snapshot_id, target, meta, tmpdir)
 
 
 def load_meta_for_restore(config, profile_name, tmpdir) -> dict:
     local = config.dest / "meta.yaml"
+    errors = []
     if local.exists():
-        return manifest.load(local)
+        try:
+            return manifest.load(local)
+        except BtrbakError as exc:
+            # A corrupt local manifest should not block restore when a remote
+            # holds a valid copy (BTR-034); remember the local failure for the
+            # final message if no remote copy works either, and tell the admin
+            # that a fallback is happening rather than silently ignoring it.
+            errors.append(f"local: {exc}")
+            print(
+                f"warning: local meta.yaml is unusable ({exc}); "
+                "trying a remote copy",
+                file=sys.stderr,
+            )
 
     profile = config.profiles[profile_name]
     if not profile.remotes:
+        if errors:
+            raise BtrbakError(
+                f"local meta.yaml is unusable and no remotes are configured: "
+                f"{errors[0]}"
+            )
         raise BtrbakError("no remotes configured and no local manifest")
 
-    errors = []
     for spec in profile.remotes:
         remote = create_remote(spec)
         tmp = tmpdir / "meta.yaml"

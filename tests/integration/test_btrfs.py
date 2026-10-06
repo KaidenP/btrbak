@@ -238,7 +238,7 @@ def test_full_pipeline_backup_restore_and_prune(btrfs_fs, monkeypatch):
     cfg = _pipeline_cfg(mnt, "pipeline", src, snapshots, remote_root, tmpdir)
 
     (src / "a.txt").write_text("a\n")
-    monkeypatch.setattr(cli.util, "now", lambda: 0)
+    monkeypatch.setattr(cli.util, "now", lambda: 50)
     assert cli.run_config(cfg, None, force=True, force_config=False, full=False, dry_run=False) == 0
 
     meta = manifest.load(snapshots / "meta.yaml")
@@ -520,8 +520,12 @@ def test_restore_rejects_a_hand_edited_codec_without_a_traceback(btrfs_fs, monke
 
     meta = manifest.load(snapshots / "meta.yaml")
     manifest.snapshots(meta, "daily")[0]["compression"] = "xz"
-    with open(snapshots / "meta.yaml", "w") as handle:
-        yaml.safe_dump(meta, handle)
+    # Corrupt BOTH copies: with a valid remote to fall back to (BTR-034),
+    # restore would succeed, but the untrusted remote manifest itself must
+    # still surface as a clean one-line error, not a traceback.
+    for manifest_path in (snapshots / "meta.yaml", remote_root / "meta.yaml"):
+        with open(manifest_path, "w") as handle:
+            yaml.safe_dump(meta, handle)
 
     with pytest.raises(util.BtrbakError, match="'compression' must be a mapping"):
         restore.run_restore(cfg, "daily", snap_id, target)
