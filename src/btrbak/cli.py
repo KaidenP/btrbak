@@ -339,7 +339,9 @@ def run_profile(cfg, profile, meta, remotes, force, full) -> int:
     if not due:
         return failures
 
-    snap_id = unique_snapshot_id(util.snapshot_id(now_ts), cfg.dest / pname)
+    snap_id = unique_snapshot_id(
+        util.snapshot_id(now_ts), cfg.dest / pname, meta, pname
+    )
     snap_path = cfg.dest / pname / snap_id
     snap_path.parent.mkdir(parents=True, exist_ok=True)
     snapshot.create_ro_snapshot(cfg.src, snap_path)
@@ -689,10 +691,26 @@ def ensure_profile_meta(meta, cfg) -> None:
         entry.update(rest)
 
 
-def unique_snapshot_id(base, profile_dir) -> str:
+def unique_snapshot_id(base, profile_dir, meta=None, profile=None) -> str:
+    """Return a snapshot id not already in use in *profile_dir* or *meta*.
+
+    Two runs within one second collide on the base id. The filesystem alone
+    is not enough to detect that, though: a manifest entry can outlive its
+    subvolume (``local_deleted`` after a failed remote delete, or a ``dest``
+    wiped out of from under btrbak), leaving the id free on disk but still
+    recorded. Reusing it would append a duplicate entry and make
+    ``meta.yaml`` unloadable, so the manifest is consulted as well.
+    """
+    taken = set()
+    if meta is not None and profile is not None:
+        taken = {
+            snap["id"]
+            for snap in manifest.snapshots(meta, profile)
+            if isinstance(snap.get("id"), str)
+        }
     candidate = base
     index = 1
-    while (profile_dir / candidate).exists():
+    while candidate in taken or (profile_dir / candidate).exists():
         candidate = f"{base}-{index}"
         index += 1
     return candidate

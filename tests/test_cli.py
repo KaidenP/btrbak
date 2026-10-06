@@ -178,6 +178,28 @@ def test_unique_snapshot_id(tmp_path):
     assert cli.unique_snapshot_id("20251004T000000Z", profile_dir) == "20251004T000000Z-1"
 
 
+def test_unique_snapshot_id_consults_the_manifest(tmp_path):
+    """A manifest entry can outlive its subvolume; the id is still taken."""
+    profile_dir = tmp_path / "daily"
+    profile_dir.mkdir()
+    meta = {"profiles": {"daily": {"snapshots": [{"id": "20251004T000000Z"}]}}}
+    assert (
+        cli.unique_snapshot_id("20251004T000000Z", profile_dir, meta, "daily")
+        == "20251004T000000Z-1"
+    )
+
+
+def test_unique_snapshot_id_is_per_profile(tmp_path):
+    """An id recorded under another profile must not block this one."""
+    profile_dir = tmp_path / "daily"
+    profile_dir.mkdir()
+    meta = {"profiles": {"other": {"snapshots": [{"id": "20251004T000000Z"}]}}}
+    assert (
+        cli.unique_snapshot_id("20251004T000000Z", profile_dir, meta, "daily")
+        == "20251004T000000Z"
+    )
+
+
 def test_run_profile_records_codec_per_snapshot(tmp_path, monkeypatch):
     profile = _profile(
         "daily",
