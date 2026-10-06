@@ -98,6 +98,52 @@ def test_scratch_dir_keeps_a_non_empty_directory(tmp_path):
     assert (path / "leftover").exists()
 
 
+def test_scratch_dir_prunes_empty_parents_but_stops_at_root(tmp_path):
+    """`<tmpdir>/<subvol>/` must not outlive the run, but tmpdir itself stays."""
+    subvol = tmp_path / "root"
+    path = subvol / "verify"
+    with util.scratch_dir(path, tmp_path) as scratch:
+        (scratch / "a.send").write_bytes(b"x")
+        (scratch / "a.send").unlink()
+    assert not path.exists()
+    assert not subvol.exists()
+    assert tmp_path.is_dir()
+
+
+def test_scratch_dir_leaves_a_used_parent_alone(tmp_path):
+    subvol = tmp_path / "root"
+    (subvol / "daily").mkdir(parents=True)
+    (subvol / "daily" / "inflight.send").write_bytes(b"x")
+    with util.scratch_dir(subvol / "verify", tmp_path):
+        pass
+    assert subvol.is_dir()
+    assert (subvol / "daily" / "inflight.send").exists()
+
+
+def test_prune_empty_dir_defaults_to_the_immediate_parent(tmp_path):
+    nested = tmp_path / "root" / "daily"
+    nested.mkdir(parents=True)
+    util.prune_empty_dir(nested)
+    assert not nested.exists()
+    assert (tmp_path / "root").is_dir()
+
+
+def test_prune_empty_dir_never_removes_root(tmp_path):
+    (tmp_path / "keep").mkdir()
+    util.prune_empty_dir(tmp_path / "keep", tmp_path)
+    assert tmp_path.is_dir()
+
+
+def test_prune_empty_dir_refuses_to_walk_above_root(tmp_path):
+    """A root that is not an ancestor must not turn into an rmdir('/')."""
+    path = tmp_path / "work"
+    path.mkdir()
+    other = tmp_path.parent / "unrelated"
+    util.prune_empty_dir(path, other)
+    assert not path.exists()
+    assert tmp_path.is_dir()
+
+
 def test_rmdir_quiet_ignores_missing_and_non_empty(tmp_path):
     (tmp_path / "full").mkdir()
     (tmp_path / "full" / "child").mkdir()

@@ -348,6 +348,8 @@ def test_retry_upload_reuses_complete_copy(tmp_path, monkeypatch):
     assert remote_a.writes == []
     assert snap["sha256"] == "deadbeef"
     assert snap["uploads"][1]["status"] == "complete"
+    # The per-profile staging directory must not outlive the send.
+    assert not (cfg.tmpdir / cfg.name).exists()
 
 
 def test_retry_upload_resends_when_no_complete_copy(tmp_path, monkeypatch):

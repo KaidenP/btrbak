@@ -105,20 +105,44 @@ def rmdir_quiet(path) -> None:
 
 
 @contextlib.contextmanager
-def scratch_dir(path):
+def scratch_dir(path, root=None):
     """Yield an existing scratch directory, removing it again when it ends empty.
 
     ``verify`` and ``restore`` download send files into a directory under
     ``tmpdir``; both unlink their downloads as they go, so the directory is
     empty by the time they finish and is removed instead of being left behind
-    for every future invocation to trip over.
+    for every future invocation to trip over. Empty parents are pruned as
+    well, so ``<tmpdir>/<subvol>/`` does not outlive the run either.
+
+    *root* bounds the walk: it is never removed, which keeps the user's
+    tmpdir root (and anything above it) safe when a scratch directory sits
+    directly inside it.
     """
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     try:
         yield path
     finally:
+        prune_empty_dir(path, root)
+
+
+def prune_empty_dir(path, root=None) -> None:
+    """Remove *path* and every parent directory left empty by it.
+
+    The walk stops before *root*, which is never removed, so a staging
+    directory can never take the caller's tmpdir root with it. A directory
+    that still holds files (from an interrupted run) simply stays put, as
+    does every parent below the one that did not empty. When *root* is not an
+    ancestor of *path*, only *path* itself is removed.
+    """
+    path = Path(path)
+    root = Path(root) if root is not None else path.parent
+    bounded = path.is_relative_to(root)
+    while path != root:
         rmdir_quiet(path)
+        if not bounded:
+            return
+        path = path.parent
 
 
 def _open_lock(path) -> int:

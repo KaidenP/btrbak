@@ -367,6 +367,18 @@ def run_profile(cfg, profile, meta, remotes, force, full) -> int:
     return failures
 
 
+def _cleanup_staging(staged, root) -> None:
+    """Remove a staged send file and the directories it emptied above it.
+
+    The per-profile and per-subvol staging directories exist only to hold the
+    file being sent, so a run must not leave them behind for the next
+    ``clean_tmpdir`` sweep to discover. Directories that still hold files are
+    left alone, and *root* (``tmpdir``) is never removed.
+    """
+    staged.unlink(missing_ok=True)
+    util.prune_empty_dir(staged.parent, root)
+
+
 def perform_send_upload(cfg, profile, entry, snap_path, parent_id, remotes) -> int:
     pname = profile.name
     staged = cfg.tmpdir / cfg.name / pname / f"{entry['id']}.send"
@@ -391,7 +403,7 @@ def perform_send_upload(cfg, profile, entry, snap_path, parent_id, remotes) -> i
             entry["uploads"].append({"remote": spec.id, "status": status})
         return failed
     finally:
-        staged.unlink(missing_ok=True)
+        _cleanup_staging(staged, cfg.tmpdir)
 
 
 def retry_upload(cfg, profile, snap, remotes) -> int:
@@ -468,7 +480,7 @@ def retry_upload(cfg, profile, snap, remotes) -> int:
                 uploads.append({"remote": spec.id, "status": status})
         return failed
     finally:
-        staged.unlink(missing_ok=True)
+        _cleanup_staging(staged, cfg.tmpdir)
 
 
 def reconcile_uploads(snap, current_ids) -> None:
@@ -601,7 +613,7 @@ def sync_settings(cfg, remotes, force_config) -> None:
     local_bytes = cfg.path.read_bytes()
     # scratch_dir removes the staging root again once the comparison file is
     # gone, so a run does not leave an empty directory behind in tmpdir.
-    with util.scratch_dir(cfg.tmpdir / cfg.name) as staging:
+    with util.scratch_dir(cfg.tmpdir / cfg.name, cfg.tmpdir) as staging:
         for spec, remote in remotes:
             tmp = staging / "config.yaml.check"
             try:
@@ -628,7 +640,7 @@ def dry_run_config_sync(cfg, by_profile, force_config) -> None:
     ``config.yaml`` aborts a real run unless ``--force-config`` is given.
     """
     local_bytes = cfg.path.read_bytes()
-    with util.scratch_dir(cfg.tmpdir / cfg.name) as staging:
+    with util.scratch_dir(cfg.tmpdir / cfg.name, cfg.tmpdir) as staging:
         tmp = staging / "config.yaml.dry-run"
         for spec, remote in unique_remotes(by_profile):
             try:
@@ -851,7 +863,7 @@ def _load_meta_for_verify(cfg):
     if local.exists():
         return manifest.load(local), False
 
-    with util.scratch_dir(cfg.tmpdir / cfg.name / "verify") as tmpdir:
+    with util.scratch_dir(cfg.tmpdir / cfg.name / "verify", cfg.tmpdir) as tmpdir:
         seen = set()
         for profile in cfg.profiles.values():
             for spec in profile.remotes:
@@ -924,7 +936,7 @@ def _verify_config(cfg) -> int:
                 "verifying against a remote copy"
             )
         by_profile = collect_remotes(cfg)
-        with util.scratch_dir(cfg.tmpdir / cfg.name / "verify") as tmpdir:
+        with util.scratch_dir(cfg.tmpdir / cfg.name / "verify", cfg.tmpdir) as tmpdir:
             for pname in cfg.profiles:
                 lookup = {spec.id: (spec, remote) for spec, remote in by_profile[pname]}
                 for snap in manifest.snapshots(meta, pname):
