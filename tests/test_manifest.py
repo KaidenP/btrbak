@@ -93,13 +93,6 @@ def test_last_committed_prefers_live_over_local_deleted():
     assert manifest.last_full_committed(meta, "p")["id"] == "b"
 
 
-def test_children():
-    meta = manifest.default()
-    manifest.add_snapshot(meta, "p", {"id": "a", "type": "full"})
-    manifest.add_snapshot(meta, "p", {"id": "b", "type": "incr", "parent": "a"})
-    assert manifest.children(meta, "p", "a")[0]["id"] == "b"
-
-
 def test_invalid_yaml_raises(tmp_path):
     path = tmp_path / "meta.yaml"
     path.write_text("version: [unclosed\n  profiles: {}")

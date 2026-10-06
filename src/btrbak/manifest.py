@@ -178,7 +178,3 @@ def last_full_committed(meta: dict, name: str) -> dict | None:
         if snap.get("type") == "full" and committed(snap):
             return snap
     return None
-
-
-def children(meta: dict, name: str, snapshot_id: str) -> list:
-    return [snap for snap in snapshots(meta, name) if snap.get("parent") == snapshot_id]

@@ -171,19 +171,6 @@ def discover_config_paths(subvol=None) -> list[Path]:
     return paths
 
 
-def discover_configs(subvol=None) -> list[Config]:
-    """Load every config in scope, raising :class:`ConfigError` on the first failure.
-
-    The strict counterpart to :func:`discover_configs_tolerant`, kept for
-    callers that would rather abort than iterate a partial result.
-    """
-    results = discover_configs_tolerant(subvol)
-    for _path, cfg, error in results:
-        if error is not None:
-            raise error
-    return [cfg for _, cfg, _ in results]
-
-
 def discover_configs_tolerant(subvol=None) -> list[tuple[Path, Config | None, ConfigError | None]]:
     """Load every config in scope, reporting per-file failures instead of raising.
 

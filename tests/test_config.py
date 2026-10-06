@@ -285,7 +285,7 @@ def test_discover_configs_prefers_yaml_over_yml(tmp_path, monkeypatch):
         },
     )
 
-    cfgs = config.discover_configs()
+    cfgs = [cfg for _path, cfg, _error in config.discover_configs_tolerant()]
 
     assert [c.name for c in cfgs] == ["other", "root"]
     assert str(cfgs[1].src) == "/a"
@@ -348,13 +348,13 @@ def test_validate_remote_config_unknown_type(tmp_path):
 def test_discover_configs_missing_dir_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "does-not-exist")
     with pytest.raises(config.ConfigError):
-        config.discover_configs()
+        config.discover_configs_tolerant()
 
 
 def test_discover_configs_empty_dir_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
     with pytest.raises(config.ConfigError):
-        config.discover_configs()
+        config.discover_configs_tolerant()
 
 
 def _minimal_profile(src="/a", dest="/b"):
@@ -389,12 +389,13 @@ def test_discover_configs_tolerant_never_raises_for_bad_content(tmp_path, monkey
     )
 
 
-def test_discover_configs_still_raises_on_the_first_bad_file(tmp_path, monkeypatch):
+def test_discover_configs_does_not_abort_on_a_bad_file(tmp_path, monkeypatch):
+    """The strict-abort helper is gone: a bad file never stops the iteration."""
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
     (tmp_path / "aaa.yaml").write_text("profiles: [\n")
     _write(tmp_path / "zzz.yaml", _minimal_profile())
-    with pytest.raises(config.ConfigError):
-        config.discover_configs()
+    results = config.discover_configs_tolerant()
+    assert [cfg is None for _path, cfg, _error in results] == [True, False]
 
 
 def test_discover_configs_tolerant_discovery_failure_still_raises(tmp_path, monkeypatch):
