@@ -908,6 +908,11 @@ def cmd_config_check(args) -> int:
             print(f"  error: {err}")
         if errors:
             return_code = 2
+        elif not warnings:
+            # A clean config otherwise prints a bare name with nothing under
+            # it, which reads like the report was truncated rather than like
+            # everything passing.
+            print("  ok")
     return return_code
 
 

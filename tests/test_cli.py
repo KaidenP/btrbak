@@ -1392,7 +1392,21 @@ def test_cmd_config_check_ok(monkeypatch, capsys):
     monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
     monkeypatch.setattr(cli.config_mod, "validate", lambda cfg: ([], []))
     assert cli.cmd_config_check(SimpleNamespace()) == 0
-    assert "root:" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "root:" in out
+    # A clean config says so, rather than printing a bare name that reads like
+    # the report was truncated.
+    assert "  ok" in out
+
+
+def test_cmd_config_check_omits_ok_when_warnings_are_present(monkeypatch, capsys):
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
+    monkeypatch.setattr(cli.config_mod, "validate", lambda cfg: ([], ["careful"]))
+    assert cli.cmd_config_check(SimpleNamespace()) == 0
+    out = capsys.readouterr().out
+    assert "warning: careful" in out
+    assert "\n  ok" not in out
 
 
 def test_cmd_config_check_reports_an_unloadable_config_and_keeps_going(tmp_path, monkeypatch, capsys):
