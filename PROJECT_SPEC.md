@@ -255,7 +255,9 @@ Structural checks run while the config is **loaded**, and are reported as
 `config error` (exit `2`) by every command:
 
 - `src`, `dest` and (when set) `tmpdir` are absolute paths.
-- Profile names match `[A-Za-z0-9][A-Za-z0-9._-]*` (see §6.1).
+- Profile names match `[A-Za-z0-9][A-Za-z0-9._-]*` (see §6.1). The `SUBVOL`
+  command-line selector is held to the same rule, because it names a file
+  directly inside `profiles.d` and must never be able to say "somewhere else".
 - Timespans parse; `keep` is a positive timespan, never `-1` (§6.3).
 
 Deeper checks run in `validate()`:
@@ -285,6 +287,12 @@ Deeper checks run in `validate()`:
   start with `age1` but are malformed (bad checksum, mixed case, truncated) at
   `config check` time rather than after a snapshot subvolume has already been
   created. Public keys are not secret, so `age`'s message is surfaced verbatim.
+  If `encryption.identity` is **not** set, that is a warning rather than an
+  error: sending needs only the recipients, so backups are written normally and
+  nothing is broken operationally — but the private identity is what `restore`
+  needs, so nothing encrypted under that profile can ever be recovered. The
+  warning exists to have that said at configuration time instead of during a
+  recovery.
 - If `compression` is enabled: valid algorithm/level.
 
 ---
@@ -426,6 +434,16 @@ surface as a traceback deep inside a command:
   tree and chain building).
 - `parent` must be a string or `null`; `uploads` must be a list of mappings.
 - A missing `snapshots` list is normalised to `[]`.
+- `compression` and `encryption` must be a mapping or `null`, must carry a
+  non-empty string `algorithm`, and their inner fields must be of the right
+  shape: `compression.level` must be an integer or a quoted integer,
+  `encryption.recipients` a list of strings, `encryption.identity` a string or
+  `null`. This is the one place where manifest validation earns its keep
+  beyond tidiness: `meta.yaml` is untrusted input (it is downloaded from a
+  remote on the disaster-recovery path), and these two fields are handed
+  straight back to `send`, which indexes them with `.get()`. A string or a list
+  where a mapping belongs would otherwise raise `AttributeError` out of the
+  CLI's top level instead of the one-line `error:` this section promises.
 
 A missing or non-numeric `created` is *not* fatal: it degrades to `0` (oldest
 possible) so a stray value cannot corrupt due-date and retention arithmetic.
@@ -555,9 +573,15 @@ send files already landed.
 If a remote `delete` fails after the local subvolume was removed, the entry is
 kept in `meta.yaml` and marked `local_deleted: true` (see §8) so the remote
 delete is retried on the next run without the snapshot ever being reused as a
-`send` parent. If the local `btrfs subvolume delete` itself fails, pruning
-aborts for that profile with both the local subvolume and the manifest entry
-intact.
+`send` parent. (It stays eligible on every subsequent run, because the
+retention test is `now - created >= keep` and that never goes back to false.)
+
+If the local `btrfs subvolume delete` itself fails, pruning aborts with both
+the local subvolume and the manifest entry intact. The abort propagates out of
+`prune()` and so ends the whole `run` — the remaining snapshots *and* the
+remaining profiles are left untouched rather than pruned in a partially applied
+pass. Deletions already applied before the failure have been persisted (§9),
+so a re-run resumes from there.
 
 The source subvolume `src` is never deleted; only snapshots under `dest`.
 
@@ -591,6 +615,9 @@ Invariants (why this is safe):
    - Verify the downloaded `sha256` and `size` against the manifest.
    - Decrypt (if encrypted) using the snapshot's recorded `encryption.identity`;
      decompress (if compressed) using the snapshot's recorded `compression`.
+     A corrupt or truncated stream raises `lzma.LZMAError`/`EOFError`, both
+     translated into a `BtrbakError` so the failure is a one-line `error:`
+     rather than a traceback (§12).
    - `btrfs receive <TARGET>` to replay the stream.
 8. The restored data ends up as a received subvolume under `TARGET`.
 
@@ -652,6 +679,16 @@ rejected target never leaves an empty directory tree behind. The same holds
 when a download is rejected: the first remaining link is fetched and checked
 against the manifest *before* the target directory exists (§10 step 6), so a
 corrupt or unreachable offsite object also leaves nothing behind.
+
+The precise boundary of that guarantee is worth stating plainly. It covers
+every rejection that can be decided from the manifest, plus the `sha256`/`size`
+of the first remaining link — which is what catches bit rot, truncation and
+tampering on any object. What it cannot cover is an object that is *corrupt and
+faithfully recorded*: a manifest whose own `sha256`/`size` describe the damaged
+bytes, which only happens if the manifest was hand-edited or was itself written
+from a bad state. That is caught one step later, by the codec, after `TARGET`
+exists. It is reported as a clean `error: xz stream is truncated` and the
+target is resumable, but it is not the same guarantee.
 
 Notes:
 
@@ -720,7 +757,13 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   counts are summed).
 - `--dry-run/-n`: simulation — no lock acquired, no snapshots created, no
   `meta.yaml`/snapshot/config written, and no remote *writes*; prints the actions
-  that would be taken. The single exception is a **read-only** fetch of each
+  that would be taken. That includes the **upload retries** a real run performs
+  before creating anything: an uncommitted snapshot is reported as either
+  `would re-send and upload <id> to <remotes>` (no surviving copy matching the
+  recorded checksum) or `would retry upload of <id> on <remotes>` (a `complete`
+  copy exists that can be reused, because `age` is non-deterministic and
+  re-sending would change the bytes). The single exception to "no writes" is a
+  **read-only** fetch of each
   remote's `config.yaml`, staged in a temp file that is removed immediately, so
   that the reported sync state is real: a differing remote copy is reported as
   the run-failing condition it is (or as an overwrite under `--force-config`),
@@ -729,6 +772,10 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 - Root check: if `os.geteuid() != 0`, print an error and exit `1` before doing
   anything.
 - `run` is the main entrypoint used by the external timer.
+- `SUBVOL` is validated with the same character set as a profile name: it is one
+  path component inside `/etc/btrbak/profiles.d`, never a path. An absolute
+  path, a `..` sequence or any separator is rejected as a config error, so the
+  selector cannot be used to load an arbitrary file from elsewhere on disk.
 - Config discovery is per-file tolerant: a profile file that fails to parse is
   reported under its own name and the remaining files are still processed, so
   `config check` lists every outstanding problem in one pass and a single typo
@@ -767,7 +814,27 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
     still pending). It is reported as `PENDING REMOTE DELETE` and skipped:
     the remotes that already dropped their object would otherwise be reported
     `MISSING`, which is noise about a state btrbak created itself.
-- `list` shows each profile's snapshots: id, age, type, parent, upload status,
+- A third non-failure state is an **orphaned profile**: recorded in
+  `meta.yaml` but absent from the config. Nothing prunes, verifies or lists a
+  profile the config does not define, so deleting a profile silently strands
+  its subvolumes under `<dest>/<profile>/`, its offsite objects and its manifest
+  entry — disk nobody reclaims, forever. `verify`, `list` and `run` therefore
+  report it as `ORPHANED PROFILE <config>/<profile>` with the snapshot count.
+  It is informational, not a failure (an admin may deliberately keep the data),
+  but it is counted in `verify`'s summary line (`<config>: ok (1 orphaned
+  profile(s))`) so `verify` never reads as a clean bill of health while
+  unreclaimed copies sit on disk. Removing them is manual: `btrfs subvolume
+  delete <dest>/<profile>/<id>`, delete the remote objects, drop the entry from
+  `meta.yaml`, or restore the profile. The comparison is always against the
+  **unfiltered** config's profile names, so `verify SUBVOL PROFILE` does not
+  report the profiles it merely filtered out.
+- `run` trusts the manifest's upload records and never re-checks a remote
+  object it has already recorded as `complete`. A remote object that rots,
+  truncates or is tampered with is therefore only ever detected by `verify`,
+  and is never repaired by `run` — there is nothing pending to retry. **`verify`
+  belongs in the timer alongside `run`**, or silent offsite corruption is never
+  noticed at all.
+- `list` shows each profile's snapshots: id, age, parent, type, upload status,
   and a compact dependency tree, indented by dependency depth and headed with a
   snapshot count. Depth is computed iteratively, so a long chain listed
   newest-first (which is what a hand-edited or re-sorted `meta.yaml` looks
@@ -782,8 +849,11 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   command arguments.
 - Expected failures always surface as a one-line `error: …` / `config error: …`
   message plus the documented exit code. Unexpected states (a hand-edited or
-  truncated `meta.yaml`, a non-numeric `created`) are rejected or normalised
-  while loading (§8.1) rather than escaping as a Python traceback.
+  truncated `meta.yaml`, a non-numeric `created`, a malformed codec record) are
+  rejected or normalised while loading (§8.1) rather than escaping as a Python
+  traceback, and the library-level exceptions that can still arise from the
+  codecs themselves — `lzma.LZMAError` and `EOFError` from a damaged stream —
+  are translated into `BtrbakError` at their source.
 
 ---
 
@@ -802,6 +872,13 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   stage their downloads in a scratch directory under `tmpdir` and remove it
   again when it is left empty, so repeated invocations do not accumulate
   directories.
+- Those scratch directories are named `.verify` and `.restore`, not `verify` and
+  `restore`. Per-profile staging directories are named after the profile, and
+  `restore`/`verify` are perfectly legal profile names — the leading dot makes
+  the two namespaces disjoint, because a profile name can never start with one.
+  Without it, a profile named `restore` would stage a send file at the very
+  path a concurrent restore is downloading into, and the two locks (the `dest`
+  lock vs. the `tmpdir` lock) do not exclude each other.
 - `run` reaps stale staging files under `<tmpdir>/<SUBVOL>/` while holding that
   same `<tmpdir>/<SUBVOL>.lock`, so a long-running restore can never have its
   staging directory swept out from under it. The lock is taken

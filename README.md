@@ -23,15 +23,37 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 
 `src`, `dest` and `tmpdir` must be absolute paths, and profile names must match
 `[A-Za-z0-9][A-Za-z0-9._-]*` (they are used as path components under `dest` and
-on each remote). An `age` recipient that names a recipients *file*, and
-`encryption.identity`, must be absolute for the same reason; inline `age1...`
-keys are fine. Run `sudo btrbak config check` to validate everything, including
-that every `age` recipient actually works.
+on each remote). The `SUBVOL` command-line selector is held to the same rule, so
+it can only ever name a file inside `profiles.d` — `btrbak list /some/other/path`
+is a config error, not a way to read an arbitrary file. An `age` recipient that
+names a recipients *file*, and `encryption.identity`, must be absolute for the
+same reason; inline `age1...` keys are fine. Run `sudo btrbak config check` to
+validate everything, including that every `age` recipient actually works.
 
 `config check` reports **every** profile file it can, not just the first one it
 cannot parse, so a single pass shows all outstanding problems. `run`, `list`
 and `verify` likewise report a file that fails to load and carry on with the
 rest.
+
+Encryption needs recipients to *write* a backup and the identity file to
+*read* one back, so `config check` warns when `encryption.identity` is unset:
+nothing breaks operationally, but nothing encrypted under that profile can ever
+be recovered.
+
+## Removing a profile
+
+Deleting a profile from a config file stops btrbak managing it entirely — its
+snapshots under `<dest>/<profile>/`, its objects on each remote, and its entry
+in `meta.yaml` are all left alone, and nothing will ever prune them.
+`run`, `list` and `verify` therefore report it as `ORPHANED PROFILE`, and
+`verify` counts it in its summary line, so the strand cannot pass unnoticed.
+Cleaning up is manual:
+
+```
+btrfs subvolume delete <dest>/<profile>/<id>     # for each snapshot
+rm <remote>/<profile>/<id>.send                  # for each snapshot
+# then drop the profile's entry from <dest>/meta.yaml
+```
 
 ## Restoring
 
@@ -43,7 +65,10 @@ sudo btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 including the first remaining link's `sha256`/`size`, which is fetched and
 checked before the directory exists. A restore rejected for any reason,
 including a corrupt or unreachable offsite object, therefore never leaves an
-empty directory tree behind.
+empty directory tree behind. The one thing that guarantee does not cover is an
+object that is corrupt *and* faithfully recorded, i.e. a `meta.yaml` whose own
+`sha256`/`size` describe the damaged bytes; that is caught by the codec one step
+later, reported as a clean `error:` with the target resumable.
 
 A restore interrupted part way through can simply be re-run into the same
 target: the links already received are detected and skipped, so the chain
@@ -64,6 +89,11 @@ instead of silently treated as part of the chain.
 drift: a snapshot whose remotes were all removed (recorded `committed: true`
 so retention prunes it by age), and one awaiting a remote delete retry
 (`local_deleted`). Both are reported informationally, not as failures.
+
+`run` trusts the manifest and never re-checks an object it already recorded as
+uploaded, so a remote object that rots or is tampered with is only ever caught
+by `verify` — and is never repaired by `run`. Run `verify` on a schedule
+alongside `run`; without it, silent offsite corruption goes unnoticed.
 
 ## Development
 
