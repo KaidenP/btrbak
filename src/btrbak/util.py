@@ -113,6 +113,42 @@ def optional_lock(path):
         os.close(fd)
 
 
+def private_dir(path) -> Path:
+    """Create *path* (and any missing parents) as root-only ``0700`` directories.
+
+    Staging and scratch directories hold raw backup data -- send streams and,
+    during a restore of an encrypted profile, decrypted payloads -- so every
+    directory btrbak creates for them must be off-limits to other local
+    users. ``mkdir(mode=...)`` is not enough: the mode is masked by the
+    process umask and only applies to the final component, so each created
+    level is chmod'ed explicitly. Existing directories are left untouched.
+    """
+    path = Path(path)
+    missing = []
+    cursor = path
+    while not cursor.exists():
+        missing.append(cursor)
+        if cursor == cursor.parent:
+            break
+        cursor = cursor.parent
+    for directory in reversed(missing):
+        directory.mkdir(exist_ok=True)
+        os.chmod(directory, 0o700)
+    return path
+
+
+def open_private(path, mode="wb"):
+    """Open *path* for writing as a ``0600`` file, returning the file object.
+
+    A plain ``open(path, "wb")`` creates the file ``0644`` under the default
+    umask, which would leave staged send streams -- entire filesystems,
+    possibly neither compressed nor encrypted -- world-readable in ``/var/tmp``
+    for the lifetime of an upload.
+    """
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    return os.fdopen(fd, mode)
+
+
 def rmdir_quiet(path) -> None:
     """Remove an empty directory, ignoring a missing or non-empty one."""
     try:
@@ -136,7 +172,7 @@ def scratch_dir(path, root=None):
     directly inside it.
     """
     path = Path(path)
-    path.mkdir(parents=True, exist_ok=True)
+    private_dir(path)
     try:
         yield path
     finally:
@@ -165,7 +201,7 @@ def prune_empty_dir(path, root=None) -> None:
 def _open_lock(path) -> int:
     """Open (creating if needed) *path* for flock and return the descriptor."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    private_dir(path.parent)
     return os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
 
 

@@ -42,7 +42,11 @@ class DirRemote(Remote):
             raise RemoteNotFoundError(f"remote file not found: {remote_path}")
         local_dest = Path(local_dest)
         local_dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, local_dest)
+        # Downloads are raw backup data; never let them land world-readable
+        # (shutil.copyfile would create them 0644 under the default umask).
+        fd = os.open(str(local_dest), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as dst, open(source, "rb") as src:
+            shutil.copyfileobj(src, dst)
 
     def write(self, local_src: Path, remote_path: str) -> None:
         destination = self._resolve(remote_path)

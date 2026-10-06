@@ -133,3 +133,98 @@ def test_send_snapshot_refuses_to_encrypt_without_a_recipient(tmp_path, monkeypa
         send.send_snapshot(
             snap, None, out, encryption={"algorithm": "age", "recipients": []}
         )
+
+
+# --- staged files must never be world-readable --------------------------------
+#
+# A staged send stream is an entire filesystem; a restore's `.dec` intermediate
+# is decrypted plaintext. Everything send.py creates must be 0600, and the
+# directories it creates 0700.
+
+
+def _fake_btrfs_run(monkeypatch):
+    from btrbak import send as send_mod
+
+    def fake_run(cmd, stdout=None, stdin=None, check=True):
+        if cmd and cmd[0] == "btrfs" and stdout is not None:
+            stdout.write(b"fake stream")
+        return None
+
+    monkeypatch.setattr(send_mod, "run", fake_run)
+
+
+def test_send_snapshot_plain_stream_is_0600(tmp_path, monkeypatch):
+    _fake_btrfs_run(monkeypatch)
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    out = tmp_path / "staging" / "out.send"
+
+    send.send_snapshot(snap, None, out)
+
+    assert out.stat().st_mode & 0o777 == 0o600
+    assert out.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_send_snapshot_xz_stream_is_0600(tmp_path, monkeypatch):
+    _fake_btrfs_run(monkeypatch)
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    out = tmp_path / "staging" / "out.send"
+
+    send.send_snapshot(snap, None, out, compression={"algorithm": "xz", "level": 1})
+
+    assert out.stat().st_mode & 0o777 == 0o600
+    # No intermediates left behind
+    assert sorted(p.name for p in out.parent.iterdir()) == ["out.send"]
+
+
+def test_compress_and_decompress_outputs_are_0600(tmp_path):
+    src = tmp_path / "data.bin"
+    src.write_bytes(b"payload " * 1000)
+    compressed = tmp_path / "data.xz"
+    restored = tmp_path / "data.out"
+
+    send.compress_file(src, compressed, preset=1)
+    send.decompress_file(compressed, restored)
+
+    assert compressed.stat().st_mode & 0o777 == 0o600
+    assert restored.stat().st_mode & 0o777 == 0o600
+    assert restored.read_bytes() == src.read_bytes()
+
+
+def test_age_output_is_created_under_a_restrictive_umask(tmp_path, monkeypatch):
+    """`age -o` creates its output 0666&~umask; send.py must tighten the umask."""
+    import os
+
+    captured = {}
+
+    def fake_run(cmd, stdout=None, stdin=None, check=True):
+        if cmd[0] == "btrfs" and stdout is not None:
+            stdout.write(b"fake stream")
+        elif cmd[0] == "age":
+            current = os.umask(0o022)
+            os.umask(current)
+            captured["umask"] = current
+            out = cmd[cmd.index("-o") + 1]
+            # created under the active umask, exactly like age itself does
+            fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+            os.close(fd)
+        return None
+
+    monkeypatch.setattr(send, "run", fake_run)
+    monkeypatch.setattr(send, "age_recipient_kind", lambda recipient: "key")
+
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    out = tmp_path / "out.send"
+    encryption = {"algorithm": "age", "recipients": ["age1abc"], "identity": None}
+
+    before = os.umask(0o022)
+    os.umask(before)
+    send.send_snapshot(snap, None, out, encryption=encryption)
+
+    assert captured["umask"] == 0o077
+    # the caller's umask must be restored, and the output private
+    after = os.umask(before)
+    assert after == before
+    assert out.stat().st_mode & 0o777 == 0o600

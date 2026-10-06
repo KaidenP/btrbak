@@ -286,3 +286,41 @@ def test_optional_lock_does_not_raise_when_held(tmp_path):
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+# --- private staging permissions --------------------------------------------
+#
+# Staged send streams are entire filesystems (decrypted plaintext during a
+# restore of an encrypted profile), so nothing under tmpdir may be created
+# world-readable.
+
+
+def test_private_dir_creates_missing_parents_as_0700(tmp_path):
+    target = tmp_path / "a" / "b" / "c"
+    util.private_dir(target)
+    assert target.is_dir()
+    for directory in (tmp_path / "a", tmp_path / "a" / "b", target):
+        assert directory.stat().st_mode & 0o777 == 0o700
+
+
+def test_private_dir_leaves_existing_directories_alone(tmp_path):
+    existing = tmp_path / "exists"
+    existing.mkdir(mode=0o755)
+    util.private_dir(existing / "new")
+    assert existing.stat().st_mode & 0o777 == 0o755
+    assert (existing / "new").stat().st_mode & 0o777 == 0o700
+
+
+def test_open_private_creates_0600(tmp_path):
+    path = tmp_path / "staged.send"
+    with util.open_private(path) as handle:
+        handle.write(b"backup data")
+    assert path.read_bytes() == b"backup data"
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_scratch_dir_is_created_private(tmp_path):
+    path = tmp_path / "subvol" / ".verify"
+    with util.scratch_dir(path, tmp_path) as scratch:
+        assert scratch.stat().st_mode & 0o777 == 0o700
+        assert (tmp_path / "subvol").stat().st_mode & 0o777 == 0o700

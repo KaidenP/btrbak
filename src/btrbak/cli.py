@@ -419,7 +419,7 @@ def _cleanup_staging(staged, root) -> None:
 def perform_send_upload(cfg, profile, entry, snap_path, parent_id, remotes) -> int:
     pname = profile.name
     staged = cfg.tmpdir / cfg.name / pname / f"{entry['id']}.send"
-    staged.parent.mkdir(parents=True, exist_ok=True)
+    util.private_dir(staged.parent)
     try:
         parent_path = cfg.dest / pname / parent_id if parent_id else None
         send.send_snapshot(
@@ -472,7 +472,7 @@ def retry_upload(cfg, profile, snap, remotes) -> int:
         return 0
 
     staged = cfg.tmpdir / cfg.name / pname / f"{snap['id']}.send"
-    staged.parent.mkdir(parents=True, exist_ok=True)
+    util.private_dir(staged.parent)
     try:
         reuse_existing = False
         for rid, (spec, remote) in by_remote.items():

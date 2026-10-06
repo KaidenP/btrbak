@@ -9,7 +9,29 @@ import os
 import shutil
 from pathlib import Path
 
-from .util import BtrbakError, age_recipient_kind, run
+from .util import (
+    BtrbakError,
+    age_recipient_kind,
+    open_private,
+    private_dir,
+    run,
+)
+
+
+def _run_private_output(cmd) -> None:
+    """Run *cmd* under a restrictive umask.
+
+    ``age`` creates its ``-o`` output with mode ``0666`` masked only by the
+    process umask, so without this a freshly encrypted (or decrypted!) file
+    would sit ``0644`` in the staging directory until something chmod'ed it.
+    Tightening the umask for the duration of the call closes that window;
+    the CLI is single-threaded, so the process-wide setting is safe.
+    """
+    old = os.umask(0o077)
+    try:
+        run(cmd)
+    finally:
+        os.umask(old)
 
 
 def _use_xz(compression) -> bool:
@@ -39,8 +61,8 @@ def _codec_level(compression) -> int:
 
 def compress_file(src, dst, preset: int = 6) -> None:
     try:
-        with open(src, "rb") as source, lzma.open(
-            dst, "wb", format=lzma.FORMAT_XZ, preset=preset
+        with open(src, "rb") as source, open_private(dst) as raw_sink, lzma.open(
+            raw_sink, "wb", format=lzma.FORMAT_XZ, preset=preset
         ) as sink:
             shutil.copyfileobj(source, sink)
     except lzma.LZMAError as exc:
@@ -57,7 +79,7 @@ def decompress_file(src, dst) -> None:
     other failure produces (§12).
     """
     try:
-        with lzma.open(src, "rb") as source, open(dst, "wb") as sink:
+        with lzma.open(src, "rb") as source, open_private(dst) as sink:
             shutil.copyfileobj(source, sink)
     except lzma.LZMAError as exc:
         raise BtrbakError(f"xz decompression failed: {exc}") from exc
@@ -74,7 +96,7 @@ def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None)
     incremental send (``None`` for a full send).
     """
     out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    private_dir(out_path.parent)
     work = out_path.parent
     use_xz = _use_xz(compression)
     use_age = _use_age(encryption)
@@ -87,13 +109,13 @@ def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None)
     intermediates = []
     try:
         if not use_xz and not use_age:
-            with open(out_path, "wb") as handle:
+            with open_private(out_path) as handle:
                 run(send_cmd, stdout=handle)
             return
 
         raw = work / (out_path.name + ".raw")
         intermediates.append(raw)
-        with open(raw, "wb") as handle:
+        with open_private(raw) as handle:
             run(send_cmd, stdout=handle)
         current = raw
 
@@ -124,7 +146,7 @@ def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None)
                         f"inline age1 key: {recipient!r}"
                     )
             age_cmd += ["-o", str(out_path), str(current)]
-            run(age_cmd)
+            _run_private_output(age_cmd)
         else:
             os.replace(current, out_path)
     finally:
@@ -148,7 +170,9 @@ def restore_stream(send_file, target, compression=None, encryption=None) -> None
                 raise BtrbakError("encryption identity is required to restore")
             decrypted = work / (send_file.name + ".dec")
             intermediates.append(decrypted)
-            run(["age", "-d", "-i", str(identity), "-o", str(decrypted), str(current)])
+            _run_private_output(
+                ["age", "-d", "-i", str(identity), "-o", str(decrypted), str(current)]
+            )
             current = decrypted
 
         if use_xz:
