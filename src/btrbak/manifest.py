@@ -22,6 +22,11 @@ def load(path) -> dict:
             data = yaml.safe_load(handle) or {}
     except yaml.YAMLError as exc:
         raise BtrbakError(f"invalid meta.yaml: {exc}")
+    if not data:
+        # An empty (or blank/comment-only) file is a not-yet-initialised
+        # manifest, exactly like a missing one; `touch <dest>/meta.yaml` must
+        # not strand `run` on a "version: None" error.
+        return default()
     if not isinstance(data, dict):
         raise BtrbakError("meta.yaml must be a mapping")
     if data.get("version") != VERSION:
@@ -158,6 +163,23 @@ def snapshots(meta: dict, name: str) -> list:
     if not entry:
         return []
     return entry.get("snapshots", [])
+
+
+def snapshots_by_id(meta: dict, name: str) -> dict[str, dict]:
+    """Return a ``{snapshot id: snapshot}`` index for a profile.
+
+    Several commands walk a profile's snapshots while looking up entries by
+    id (``verify``'s parent check, ``restore``'s chain walk, ``prune``).
+    :func:`get_snapshot` is a linear scan, so doing that once per id turns
+    those walks quadratic for large manifests; callers that need repeated
+    lookups build this index once instead.
+    """
+    by_id: dict[str, dict] = {}
+    for snap in snapshots(meta, name):
+        sid = snap.get("id")
+        if sid:
+            by_id[sid] = snap
+    return by_id
 
 
 def get_snapshot(meta: dict, name: str, snapshot_id: str) -> dict | None:

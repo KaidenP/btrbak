@@ -22,6 +22,30 @@ def test_add_remove_get(tmp_path):
     assert [s["id"] for s in manifest.snapshots(meta, "daily")] == ["b"]
 
 
+def test_snapshots_by_id_indexes_a_profile(tmp_path):
+    meta = manifest.default()
+    manifest.add_snapshot(meta, "p", {"id": "a", "type": "full"})
+    manifest.add_snapshot(meta, "p", {"id": "b", "type": "incr", "parent": "a"})
+    by_id = manifest.snapshots_by_id(meta, "p")
+    assert set(by_id) == {"a", "b"}
+    assert by_id["b"]["parent"] == "a"
+    assert manifest.snapshots_by_id(meta, "missing") == {}
+
+
+def test_snapshots_by_id_skips_entries_without_id():
+    meta = manifest.default()
+    manifest.add_snapshot(meta, "p", {"type": "full"})
+    manifest.add_snapshot(meta, "p", {"id": "a", "type": "full"})
+    assert set(manifest.snapshots_by_id(meta, "p")) == {"a"}
+
+
+@pytest.mark.parametrize("content", ["", "   \n", "# only a comment\n"])
+def test_load_treats_blank_manifest_as_default(tmp_path, content):
+    path = tmp_path / "meta.yaml"
+    path.write_text(content)
+    assert manifest.load(path) == manifest.default()
+
+
 def test_committed_and_last():
     meta = manifest.default()
     manifest.add_snapshot(meta, "p", {"id": "a", "type": "full", "uploads": [{"remote": "r", "status": "complete"}]})
