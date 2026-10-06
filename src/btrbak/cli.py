@@ -834,7 +834,8 @@ def cmd_list(args) -> int:
             )
         for pname in selected.profiles:
             snaps = manifest.snapshots(meta, pname)
-            print(f"{cfg.name}/{pname}:" + (f" ({len(snaps)} snapshots)" if snaps else ""))
+            count = f" ({len(snaps)} snapshot{'' if len(snaps) == 1 else 's'})" if snaps else ""
+            print(f"{cfg.name}/{pname}:" + count)
             depths = _snapshot_depths(meta, pname)
             for snap in snaps:
                 depth = depths.get(snap.get("id"), 0)

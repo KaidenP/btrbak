@@ -1178,6 +1178,12 @@ def test_cmd_list_reports_snapshot_count(tmp_path, monkeypatch, capsys):
     assert "root/daily: (2 snapshots)" in capsys.readouterr().out
 
 
+def test_cmd_list_singular_snapshot_count(tmp_path, monkeypatch, capsys):
+    _list_setup(tmp_path, monkeypatch, [_local("s1", 1000)])
+    assert cli.cmd_list(_verify_args()) == 0
+    assert "root/daily: (1 snapshot)" in capsys.readouterr().out
+
+
 def test_cmd_list_empty_profile_has_no_count(tmp_path, monkeypatch, capsys):
     _list_setup(tmp_path, monkeypatch, [])
     assert cli.cmd_list(_verify_args()) == 0
