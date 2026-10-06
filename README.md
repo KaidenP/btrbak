@@ -39,12 +39,31 @@ rest.
 sudo btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 ```
 
-`TARGET` must be on btrfs and is created only after the whole chain validates.
+`TARGET` must be on btrfs and is created only after the whole chain validates —
+including the first remaining link's `sha256`/`size`, which is fetched and
+checked before the directory exists. A restore rejected for any reason,
+including a corrupt or unreachable offsite object, therefore never leaves an
+empty directory tree behind.
+
 A restore interrupted part way through can simply be re-run into the same
 target: the links already received are detected and skipped, so the chain
 resumes instead of failing with `File exists`. Detection is by subvolume UUID,
 not name alone, so an unrelated subvolume sitting at a snapshot id is rejected
 instead of silently treated as part of the chain.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | runtime error (including a differing remote `config.yaml`) |
+| `2` | config/validation error |
+| `130` | interrupted (Ctrl-C) |
+
+`verify` treats two manifest states as normal resting points rather than
+drift: a snapshot whose remotes were all removed (recorded `committed: true`
+so retention prunes it by age), and one awaiting a remote delete retry
+(`local_deleted`). Both are reported informationally, not as failures.
 
 ## Development
 

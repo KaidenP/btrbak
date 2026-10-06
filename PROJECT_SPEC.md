@@ -324,6 +324,13 @@ Format: `YYYYmmddTHHMMSSZ` (UTC, second precision), e.g. `20251004T154300Z`.
 Sortable, filesystem-safe, deterministic. If a collision occurs in the same
 profile (two runs within one second), append `-1`, `-2`, ….
 
+A collision is detected against **both** the filesystem and the manifest. The
+filesystem alone is not enough: an entry can outlive its subvolume — a
+`local_deleted` snapshot awaiting a remote-delete retry, or a `dest` wiped out
+from under btrbak — leaving the id free on disk but still recorded. Reusing it
+would append a duplicate entry and make `meta.yaml` unloadable (§8.1), so the
+manifest is consulted too.
+
 ---
 
 ## 8. Manifest — `meta.yaml`
@@ -422,6 +429,10 @@ surface as a traceback deep inside a command:
 
 A missing or non-numeric `created` is *not* fatal: it degrades to `0` (oldest
 possible) so a stray value cannot corrupt due-date and retention arithmetic.
+
+The duplicate-`id` check is also why snapshot-id allocation consults the
+manifest as well as the filesystem (§7.3): making the check strict is only safe
+if nothing can ever append an id that is already recorded.
 
 ---
 
@@ -568,16 +579,20 @@ Invariants (why this is safe):
 3. Build the chain: follow `parent` links from the target snapshot back to the
    full (root), then reverse to get root → … → target order.
 4. Validate the **whole** chain up front: no link may be `local`-only or lack a
-   complete remote upload. `TARGET` is created only after every check passes, so
-   a rejected restore never leaves an empty directory tree behind.
+   complete remote upload.
 5. Determine the resume point (§10.2).
-6. For each remaining snapshot in chain order:
+6. Download and verify the **first remaining** link, then create `TARGET`.
+   Everything checkable from the manifest has been checked by now; the one
+   thing left is the object's own integrity, and finding a corrupt or
+   unreachable stream must not leave an empty directory tree behind. The
+   staged file is reused for that link, so this costs no extra download.
+7. For each remaining snapshot in chain order:
    - Download `<profile>/<id>.send` from a remote (prefer a `complete` upload).
    - Verify the downloaded `sha256` and `size` against the manifest.
    - Decrypt (if encrypted) using the snapshot's recorded `encryption.identity`;
      decompress (if compressed) using the snapshot's recorded `compression`.
    - `btrfs receive <TARGET>` to replay the stream.
-7. The restored data ends up as a received subvolume under `TARGET`.
+8. The restored data ends up as a received subvolume under `TARGET`.
 
 `btrfs receive` matches incremental parents by the subvolume UUID embedded in
 the send stream, so replaying in order into the same target is sufficient.
@@ -633,7 +648,10 @@ building the chain.
 
 The target is validated before it is created — it must either not exist or be a
 directory, and must live on a btrfs filesystem. Only then is it created, so a
-rejected target never leaves an empty directory tree behind.
+rejected target never leaves an empty directory tree behind. The same holds
+when a download is rejected: the first remaining link is fetched and checked
+against the manifest *before* the target directory exists (§10 step 6), so a
+corrupt or unreachable offsite object also leaves nothing behind.
 
 Notes:
 
@@ -727,16 +745,28 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   `btrbak run SUBVOL PROFILE --force` (e.g. from an apt hook).
 - `verify` checks every remote file against the manifest (existence, size,
   `sha256`) and that the dependency chain is intact; reports drift/failures.
-  A parent that exists but can never be received — local-only, or with no
-  complete upload — is reported as `BROKEN CHAIN`, mirroring what `restore`
-  itself enforces, so a chain that cannot be restored does not verify as
-  `ok`. When the local `<dest>/meta.yaml` is missing, `verify` falls back to a
-  copy downloaded from a configured remote; if no manifest is available locally
-  or on any remote, it reports an error. Like `run` and `list`, `verify`
-  iterates **every** matching config: a config that fails to load, or a broken
-  remote definition in one config, is reported to stderr and the remaining
-  configs are still verified. Exit `2` wins over `1` when both occur, since a
-  config error is the more fundamental failure.
+  A parent that exists but can never be received is reported as
+  `BROKEN CHAIN`, mirroring what `restore` itself enforces, so a chain that
+  cannot be restored does not verify as `ok`. "Can never be received" is
+  judged by exactly the rule `restore.pick_remote` uses — a send file plus a
+  `complete` upload on a remote that is still configured — which also catches
+  a parent whose remotes were all removed (§8). When the local
+  `<dest>/meta.yaml` is missing, `verify` falls back to a copy downloaded from
+  a configured remote; if no manifest is available locally or on any remote, it
+  reports an error. Like `run` and `list`, `verify` iterates **every** matching
+  config: a config that fails to load, or a broken remote definition in one
+  config, is reported to stderr and the remaining configs are still verified.
+  Exit `2` wins over `1` when both occur, since a config error is the more
+  fundamental failure.
+- Two manifest states are deliberately *not* failures, because §8 makes them
+  normal resting points rather than drift:
+  - a snapshot marked `committed: true` with no uploads (every remote was
+    removed). Retention prunes it by age like a local snapshot, so reporting
+    it would make `verify` exit `1` on every run until `keep` expires.
+  - a snapshot marked `local_deleted` (local subvolume gone, remote delete
+    still pending). It is reported as `PENDING REMOTE DELETE` and skipped:
+    the remotes that already dropped their object would otherwise be reported
+    `MISSING`, which is noise about a state btrbak created itself.
 - `list` shows each profile's snapshots: id, age, type, parent, upload status,
   and a compact dependency tree, indented by dependency depth and headed with a
   snapshot count. Depth is computed iteratively, so a long chain listed
@@ -745,7 +775,8 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   parent simply settles at the depth reached. When the local manifest is
   missing, `list` says so on stderr rather than silently printing nothing.
 - Exit codes: `0` success; `1` runtime error (including a differing remote
-  `config.yaml` that is not overwritten); `2` config/validation error.
+  `config.yaml` that is not overwritten); `2` config/validation error; `130`
+  interrupted (Ctrl-C), reported as a one-liner rather than a traceback.
 - Logging to stderr (levels via `-v`); never log secrets or auth values, and
   subprocess error messages include only the program name (plus stderr), never
   command arguments.
@@ -776,10 +807,11 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   staging directory swept out from under it. The lock is taken
   **non-blockingly**: a restore in progress skips the sweep (logged at `-v`)
   and the backup proceeds normally.
-- Staging directories (`<tmpdir>/<SUBVOL>/`, and the `verify`/`restore`
-  subdirectories within it) are removed again once they are left empty, so
-  repeated runs do not accumulate them. A directory still holding files from an
-  interrupted run is left in place.
+- Staging directories (`<tmpdir>/<SUBVOL>/`, the per-profile directories a
+  send stages through, and the `verify`/`restore` subdirectories within it) are
+  removed again once they are left empty, so repeated runs do not accumulate
+  them. The walk stops before `tmpdir` itself, which is never removed, and a
+  directory still holding files from an interrupted run is left in place.
 - Profile names are validated as path components (§6.1), so no config can make
   snapshots or remote objects land outside `dest` / the remote root.
 - `src`, `dest` and `tmpdir` must be absolute (§6.1), so behaviour never
@@ -787,8 +819,9 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
 - `tmpdir` staging files are removed on success; on failure the snapshot is
   retained and the send is re-attempted next run.
 - If `dest` is nested inside `src`, `run` prints a single warning naming both
-  paths and waits 5 s (Ctrl-C aborts) before continuing. `config check` reports
-  the same condition without the wait.
+  paths and waits 5 s (Ctrl-C aborts with exit `130` and a one-line message)
+  before continuing. `config check` reports the same condition without the
+  wait.
 - A remote `config.yaml` is never silently overwritten; a differing remote copy
   is an error unless `--force-config` is passed.
 - `auth.yaml` and the age identity file should be `0600`; the tool warns if not.
@@ -824,17 +857,24 @@ btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
   that dependency-preserving pruning never orphans an incremental. Also covers
   resuming a restore that was interrupted mid-chain, re-running a restore over
   an already-received link, rejecting a non-subvolume entry occupying a
-  snapshot id in the target, and rejecting a same-named decoy subvolume.
-- CLI: root-check, exit-code mapping for every error class, arg parsing (`-v`
-  before and after the subcommand), `--dry-run` acquires no lock and writes
-  nothing (including no staging directory), dry-run `config.yaml` sync
-  reporting for missing/in-sync/differing remotes, `verify` covering
-  ok/corrupt/size-mismatch/missing/broken-chain/unrestorable-parent/
-  incomplete/unknown-remote plus its continuation across configs, `list`
-  snapshot counts, dependency-depth rendering for a deep out-of-order chain,
-  and missing-manifest warning, `config check` reporting every broken profile
-  file rather than stopping at the first, and the staging-directory lock being
+  snapshot id in the target, rejecting a same-named decoy subvolume, refusing a
+  tampered send stream **without creating the target**, and `verify` accepting a
+  profile whose remotes were all removed.
+- CLI: root-check, exit-code mapping for every error class (including `130` for
+  Ctrl-C), arg parsing (`-v` before and after the subcommand), `--dry-run`
+  acquires no lock and writes nothing (including no staging directory), dry-run
+  `config.yaml` sync reporting for missing/in-sync/differing remotes, `verify`
+  covering ok/corrupt/size-mismatch/missing/broken-chain/unrestorable-parent/
+  incomplete/unknown-remote plus its continuation across configs, the remote
+  `meta.yaml` fallback (prefer local, else download from the first remote that
+  has one), `list` snapshot counts and singular/plural rendering,
+  dependency-depth rendering for a deep out-of-order chain, and
+  missing-manifest warning, `config check` reporting every broken profile file
+  rather than stopping at the first, and the staging-directory lock being
   skipped rather than fatal when held.
+- Staging hygiene: scratch and send directories are pruned when emptied, the
+  walk stops before `tmpdir` itself, and a directory still holding files is
+  left in place.
 
 ---
 
