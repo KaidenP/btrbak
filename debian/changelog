@@ -1,3 +1,13 @@
+btrbak (1.1.1-1) unstable; urgency=medium
+
+  * Harden packaging, systemd, and CI.
+  * Harden CLI orchestration, diagnostics, and exit codes.
+  * Harden dir and gdrive remotes, config parsing, and validation.
+  * Harden send/restore pipelines, manifest validation, and retention pruning.
+  * Harden filesystem, lock, and subprocess helpers.
+
+ -- Kaiden <11036039+KaidenP@users.noreply.github.com>  Tue, 06 Oct 2026 20:51:12 -0400
+
 btrbak (1.1.0-1) unstable; urgency=medium
 
   * Add Google Drive remote with OAuth authorization and resumable uploads.

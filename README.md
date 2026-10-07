@@ -21,13 +21,13 @@ artifact, then install it with apt so the dependencies are resolved
 automatically:
 
 ```
-sudo apt-get install ./btrbak_1.1.0-1_all.deb
+sudo apt-get install ./btrbak_1.1.1-1_all.deb
 ```
 
 Or, if you already have `python3`, `python3-yaml`, and `btrfs-progs` installed:
 
 ```
-sudo dpkg -i btrbak_1.1.0-1_all.deb
+sudo dpkg -i btrbak_1.1.1-1_all.deb
 ```
 
 The package installs:
