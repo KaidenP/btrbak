@@ -9,6 +9,7 @@ The Google API client is imported lazily so that a btrbak installation that
 only uses the ``dir`` backend does not need it installed.
 """
 
+import json
 import os
 import tempfile
 import time
@@ -22,7 +23,7 @@ _CHUNK = 8 * 1024 * 1024  # 8 MiB
 _ID_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
 )
-_RETRIABLE_STATUS = frozenset({403, 429, 500, 502, 503, 504})
+_RETRIABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 _MAX_RETRIES = 5
 _RETRY_BASE_DELAY = 1.0  # seconds
 _DEP_MESSAGE = (
@@ -71,7 +72,6 @@ class GdriveRemote(Remote):
         # constructing a remote never touches the network (validate() does).
         self._service_obj = service
         self._root_id = None
-        self._folder_ids = {}
 
     def _service(self):
         if self._service_obj is None:
@@ -80,8 +80,33 @@ class GdriveRemote(Remote):
 
     def validate(self) -> None:
         # Resolves the root folder against the live API, so an unreachable or
-        # misconfigured remote is reported here (as the interface requires).
-        self._root_folder_id()
+        # misconfigured remote is reported here (as the interface requires),
+        # then proves write access with a create-and-delete probe.
+        root_id = self._root_folder_id()
+        self._write_probe(self._service(), root_id)
+
+    def _write_probe(self, svc, folder_id) -> None:
+        """Verify write access to *folder_id* by creating and deleting a file."""
+        name = ".btrbak-probe-" + os.urandom(4).hex()
+        try:
+            created = _run(
+                svc.files().create(
+                    body={
+                        "name": name,
+                        "mimeType": "application/octet-stream",
+                        "parents": [folder_id],
+                    },
+                    fields="id",
+                )
+            )
+        except RemoteError as exc:
+            raise RemoteError(f"gdrive folder is not writable: {exc}") from exc
+        file_id = created.get("id") if isinstance(created, dict) else None
+        if file_id is not None:
+            try:
+                _run(svc.files().delete(fileId=file_id))
+            except RemoteError as exc:
+                raise RemoteError(f"gdrive folder is not writable: {exc}") from exc
 
     # --- path handling -----------------------------------------------------
 
@@ -140,10 +165,6 @@ class GdriveRemote(Remote):
         return meta["id"]
 
     def _child_folder_id(self, svc, parent_id, name):
-        key = (parent_id, name)
-        cached = self._folder_ids.get(key)
-        if cached is not None:
-            return cached
         if parent_id is None:
             # Top level of "My Drive": no ``parents`` constraint. Restrict to
             # folders the user owns (not merely shared with them).
@@ -169,7 +190,6 @@ class GdriveRemote(Remote):
             raise RemoteError(
                 f"multiple gdrive folders named {name!r} under {parent_id}"
             )
-        self._folder_ids[key] = matches[0]["id"]
         return matches[0]["id"]
 
     def _ensure_folder(self, svc, parent_id, name) -> str:
@@ -180,13 +200,12 @@ class GdriveRemote(Remote):
         if parent_id is not None:
             body["parents"] = [parent_id]
         created = _run(svc.files().create(body=body, fields="id"))
-        self._folder_ids[(parent_id, name)] = created["id"]
         return created["id"]
 
     def _file_id(self, svc, parent_id: str, name: str):
         q = (
             f"name = '{_quote(name)}' and '{parent_id}' in parents and "
-            f"mimeType != '{FOLDER_MIME}' and trashed = false"
+            f"mimeType = 'application/octet-stream' and trashed = false"
         )
         matches = _list(svc, q)
         if not matches:
@@ -239,7 +258,10 @@ class GdriveRemote(Remote):
         file_id = self._file_id(svc, parent, parts[-1])
         if file_id is None:
             return
-        _run(svc.files().delete(fileId=file_id))
+        try:
+            _run(svc.files().delete(fileId=file_id))
+        except RemoteNotFoundError:
+            return  # a concurrent delete already removed it
 
     # --- media (kept separate so tests can stub the HTTP client) -----------
 
@@ -264,18 +286,45 @@ class GdriveRemote(Remote):
                 request = svc.files().update(
                     fileId=existing, media_body=media, fields="id"
                 )
+                _run(request)
             else:
                 body = {"name": name, "parents": [parent_id]}
                 request = svc.files().create(
                     body=body, media_body=media, fields="id"
                 )
-            _run(request)
+                try:
+                    _run(request)
+                except Exception:
+                    # Drive creates the (empty) file entry immediately on the
+                    # create metadata POST, before any content chunk; a failed
+                    # upload would otherwise leave a phantom zero-byte file.
+                    self._cleanup_phantom_file(svc, parent_id, name)
+                    raise
+
+    def _cleanup_phantom_file(self, svc, parent_id: str, name: str) -> None:
+        """Best-effort removal of a zero-byte file left by a failed create."""
+        try:
+            file_id = self._file_id(svc, parent_id, name)
+        except RemoteError:
+            return
+        if file_id is None:
+            return
+        try:
+            svc.files().delete(fileId=file_id).execute()
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            pass
 
     def _download(self, svc, file_id: str, local_dest: Path) -> None:
         try:
             from googleapiclient.http import MediaIoBaseDownload
         except ImportError as exc:
             raise RemoteError(_DEP_MESSAGE) from exc
+        try:
+            from googleapiclient.errors import HttpError
+            from httplib2 import HttpLib2Error
+            _exc_types = (HttpError, HttpLib2Error, OSError, ConnectionError, TimeoutError)
+        except ImportError:
+            _exc_types = (OSError, ConnectionError, TimeoutError)
 
         local_dest = Path(local_dest)
         local_dest.parent.mkdir(parents=True, exist_ok=True)
@@ -300,7 +349,7 @@ class GdriveRemote(Remote):
                     try:
                         _status, done = downloader.next_chunk()
                         attempt = 0
-                    except Exception as exc:  # noqa: BLE001
+                    except _exc_types as exc:
                         if _is_retriable(exc) and attempt < _MAX_RETRIES:
                             time.sleep(_retry_delay(exc, attempt))
                             attempt += 1
@@ -346,13 +395,21 @@ def _authorized_http(credentials):
     ``RedirectMissingLocation`` on the first chunk of any multi-chunk file.
     The upload code consumes the ``Range`` header itself and never needs to
     follow a redirect, so disabling redirects is both necessary and safe.
+
+    Note: ``follow_redirects = False`` applies to *all* requests through this
+    transport, not just resumable uploads. That is fine because no Drive
+    endpoint used by this backend requires redirect-following, but it is
+    currently required for resumable uploads (see above). The underlying
+    transport is built with a bounded 60s timeout so a hung connection cannot
+    block a request indefinitely.
     """
     try:
+        import httplib2
         from google_auth_httplib2 import AuthorizedHttp
     except ImportError as exc:
         raise RemoteError(_DEP_MESSAGE) from exc
 
-    authorized = AuthorizedHttp(credentials)
+    authorized = AuthorizedHttp(credentials, http=httplib2.Http(timeout=60))
     authorized.follow_redirects = False
     return authorized
 
@@ -399,13 +456,20 @@ def _list(svc, q: str, corpora: str | None = None) -> list[dict]:
 
 
 def _run(request):
+    try:
+        from googleapiclient.errors import HttpError
+        from httplib2 import HttpLib2Error
+        _exc_types = (HttpError, HttpLib2Error, OSError, ConnectionError, TimeoutError)
+    except ImportError:
+        _exc_types = (OSError, ConnectionError, TimeoutError)
+
     attempt = 0
     while True:
         try:
             return request.execute()
         except RemoteError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except _exc_types as exc:
             if _is_retriable(exc) and attempt < _MAX_RETRIES:
                 time.sleep(_retry_delay(exc, attempt))
                 attempt += 1
@@ -418,9 +482,44 @@ def _run(request):
 def _is_retriable(exc) -> bool:
     """True for transient errors worth retrying (rate limit / 5xx / reset)."""
     status = getattr(getattr(exc, "resp", None), "status", None)
+    if status == 403:
+        return _is_rate_limited(exc)
     if status in _RETRIABLE_STATUS:
         return True
     return isinstance(exc, (ConnectionError, TimeoutError))
+
+
+def _is_rate_limited(exc) -> bool:
+    """True when a 403 body reports a rate limit (vs. a permanent 403)."""
+    content = getattr(exc, "content", None)
+    if not content:
+        return False
+    try:
+        data = json.loads(content)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    error = data.get("error")
+    if not isinstance(error, dict):
+        return False
+    reason = error.get("reason")
+    if isinstance(reason, str) and reason.lower() in (
+        "ratelimitexceeded",
+        "userratelimitexceeded",
+    ):
+        return True
+    errors = error.get("errors")
+    if isinstance(errors, list):
+        for item in errors:
+            if isinstance(item, dict):
+                item_reason = item.get("reason")
+                if isinstance(item_reason, str) and item_reason.lower() in (
+                    "ratelimitexceeded",
+                    "userratelimitexceeded",
+                ):
+                    return True
+    return False
 
 
 def _retry_after_seconds(exc) -> float | None:
@@ -445,8 +544,8 @@ def _retry_after_seconds(exc) -> float | None:
 def _retry_delay(exc, attempt: int) -> float:
     delay = _retry_after_seconds(exc)
     if delay is not None:
-        return delay
-    return _RETRY_BASE_DELAY * (2 ** attempt)
+        return min(delay, 60.0)
+    return min(_RETRY_BASE_DELAY * (2 ** attempt), 60.0)
 
 
 def _is_not_found(exc) -> bool:

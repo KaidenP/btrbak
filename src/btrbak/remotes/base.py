@@ -29,8 +29,12 @@ def split_safe_path(remote_path: str) -> list[str]:
     if remote_path.startswith("/") or remote_path != remote_path.strip():
         raise RemoteError(f"invalid remote path: {remote_path!r}")
     parts = remote_path.split("/")
-    if any(part in ("", ".", "..") or not part.strip() for part in parts):
-        raise RemoteError(f"invalid remote path: {remote_path!r}")
+    for part in parts:
+        stripped = part.strip()
+        if stripped in ("", ".", ".."):
+            raise RemoteError(f"invalid remote path: {remote_path!r}")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in part):
+            raise RemoteError(f"invalid remote path: {remote_path!r}")
     return parts
 
 

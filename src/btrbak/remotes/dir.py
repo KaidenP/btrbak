@@ -17,6 +17,27 @@ class DirRemote(Remote):
         if "path" not in settings:
             raise RemoteError("'dir' remote requires a 'path' setting")
         self.root = Path(settings["path"]).expanduser().resolve()
+        # A configured ``path`` may be a symlink (followed by ``resolve`` as a
+        # convenience), but its resolved target must be owned by us and not
+        # group-/world-writable: an attacker-controlled root would let a
+        # symlink swap redirect reads/writes. Existing parents are not
+        # checked here; ``validate`` probes writability separately.
+        self._check_root_ownership()
+
+    def _check_root_ownership(self) -> None:
+        """Refuse a remote root owned by another uid or group-/world-writable."""
+        try:
+            st = os.stat(self.root)
+        except FileNotFoundError:
+            return  # the root does not exist yet; validate() will probe it
+        if st.st_uid != os.geteuid():
+            raise RemoteError(
+                f"remote path is not owned by the effective uid: {self.root}"
+            )
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise RemoteError(
+                f"remote path is group- or world-writable: {self.root}"
+            )
 
     def _resolve(self, remote_path: str) -> Path:
         # Build the target lexically from validated components; never follow
@@ -53,6 +74,7 @@ class DirRemote(Remote):
         if self.root.exists():
             if not self.root.is_dir():
                 raise RemoteError(f"remote path is not a directory: {self.root}")
+            self._check_root_ownership()
             self._write_probe(
                 self.root, f"remote path is not writable: {self.root}"
             )
@@ -77,31 +99,47 @@ class DirRemote(Remote):
         try:
             os.close(fd)
         finally:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
+            # Best-effort cleanup; try twice in case the first unlink races
+            # with a concurrent cleanup, but never crash on a stale probe.
+            for _ in range(2):
+                try:
+                    os.unlink(tmp_name)
+                    break
+                except OSError:
+                    pass
 
     def read(self, remote_path: str, local_dest: Path) -> None:
         source = self._resolve(remote_path)
         self._recheck(source, remote_path)
         if not source.exists():
             raise RemoteNotFoundError(f"remote file not found: {remote_path}")
+        if source.is_dir():
+            raise RemoteError(f"remote path is a directory: {remote_path}")
         local_dest = Path(local_dest)
-        local_dest.parent.mkdir(parents=True, exist_ok=True)
-        # Download to a temp file in the destination directory and atomically
-        # replace, so a failed download never leaves a partial file. mkstemp
-        # creates the temp file (and hence the final file) as 0600: downloads
-        # are raw backup data and must never land world-readable.
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(local_dest.parent),
-            prefix=local_dest.name + ".",
-            suffix=".tmp",
-        )
         try:
-            with os.fdopen(fd, "wb") as dst, open(source, "rb") as src:
-                shutil.copyfileobj(src, dst)
+            local_dest.parent.mkdir(parents=True, exist_ok=True)
+            # Download to a temp file in the destination directory and
+            # atomically replace, so a failed download never leaves a partial
+            # file. mkstemp creates the temp file (and hence the final file)
+            # as 0600: downloads are raw backup data and must never land
+            # world-readable.
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(local_dest.parent),
+                prefix=local_dest.name + ".",
+                suffix=".tmp",
+            )
+        except OSError as exc:
+            raise RemoteError(f"cannot download {remote_path!r}: {exc}") from exc
+        try:
+            with os.fdopen(fd, "wb") as dst:
+                with open(source, "rb") as src:
+                    shutil.copyfileobj(src, dst)
+                dst.flush()
+                os.fsync(dst.fileno())
             os.replace(tmp_name, local_dest)
+            _fsync_dir(local_dest.parent)
+        except OSError as exc:
+            raise RemoteError(f"cannot download {remote_path!r}: {exc}") from exc
         finally:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
@@ -131,10 +169,16 @@ class DirRemote(Remote):
     def delete(self, remote_path: str) -> None:
         target = self._resolve(remote_path)
         self._recheck(target, remote_path)
+        if target.is_dir():
+            raise RemoteError(f"remote path is a directory: {remote_path}")
         try:
             target.unlink()
         except FileNotFoundError:
             pass
+        except IsADirectoryError as exc:
+            raise RemoteError(f"remote path is a directory: {remote_path}") from exc
+        except OSError as exc:
+            raise RemoteError(f"cannot delete {remote_path!r}: {exc}") from exc
 
 
 def _fsync_dir(path: Path) -> None:
