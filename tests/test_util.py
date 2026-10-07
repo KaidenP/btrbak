@@ -183,7 +183,7 @@ def test_btrfs_fsid_matches_uppercase_uuid(monkeypatch):
         completed = subprocess.CompletedProcess(
             args=[],
             returncode=0,
-            stdout=f"Label: none  {label}: 7574148f-c138-4c09-9203-0352942dfe4f\n".encode(),
+            stdout=f"Label: none\n\t{label}: 7574148f-c138-4c09-9203-0352942dfe4f\n".encode(),
         )
         monkeypatch.setattr(util.subprocess, "run", lambda *a, **k: completed)
         assert util.btrfs_fsid("/mnt/data") == "7574148f-c138-4c09-9203-0352942dfe4f"
