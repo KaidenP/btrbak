@@ -18,8 +18,31 @@ def test_add_remove_get(tmp_path):
     manifest.add_snapshot(meta, "daily", {"id": "b", "type": "incr", "parent": "a"})
     assert [s["id"] for s in manifest.snapshots(meta, "daily")] == ["a", "b"]
     assert manifest.get_snapshot(meta, "daily", "a")["type"] == "full"
-    manifest.remove_snapshot(meta, "daily", "a")
-    assert [s["id"] for s in manifest.snapshots(meta, "daily")] == ["b"]
+    manifest.remove_snapshot(meta, "daily", "b")
+    assert [s["id"] for s in manifest.snapshots(meta, "daily")] == ["a"]
+
+
+def test_remove_snapshot_regrafts_dependents_onto_real_parent():
+    meta = manifest.default()
+    manifest.add_snapshot(meta, "p", {"id": "a", "type": "full"})
+    manifest.add_snapshot(meta, "p", {"id": "b", "type": "incr", "parent": "a"})
+    manifest.add_snapshot(meta, "p", {"id": "c", "type": "incr", "parent": "b"})
+    manifest.remove_snapshot(meta, "p", "b")
+    assert manifest.get_snapshot(meta, "p", "c")["parent"] == "a"
+
+
+def test_remove_snapshot_rejects_orphaning_dependents():
+    meta = manifest.default()
+    manifest.add_snapshot(meta, "p", {"id": "a", "type": "full"})
+    manifest.add_snapshot(meta, "p", {"id": "b", "type": "incr", "parent": "a"})
+    with pytest.raises(manifest.BtrbakError, match="has dependents"):
+        manifest.remove_snapshot(meta, "p", "a")
+
+
+def test_remove_snapshot_missing_profile_is_noop():
+    meta = manifest.default()
+    manifest.remove_snapshot(meta, "missing", "a")
+    assert "missing" not in meta["profiles"]
 
 
 def test_snapshots_by_id_indexes_a_profile(tmp_path):
@@ -67,11 +90,18 @@ def test_committed_flag_overrides_empty_uploads():
 
 
 def test_committed_local_deleted():
-    assert manifest.committed(
+    assert not manifest.committed(
         {
             "type": "full",
             "local_deleted": True,
             "uploads": [{"remote": "r", "status": "failed"}],
+        }
+    )
+    assert manifest.committed(
+        {
+            "type": "full",
+            "local_deleted": True,
+            "uploads": [{"remote": "r", "status": "complete"}],
         }
     )
 

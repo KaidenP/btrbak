@@ -1,5 +1,6 @@
 """Read/write the ``meta.yaml`` manifest (dependency DAG + upload state)."""
 
+import os
 import re
 from pathlib import Path
 
@@ -30,50 +31,67 @@ def load(path) -> dict:
     if not path.exists():
         return default()
     try:
-        size = path.stat().st_size
-        if size > MAX_MANIFEST_BYTES:
-            raise BtrbakError(
-                f"meta.yaml is {size} bytes; refusing to load a manifest larger "
-                f"than {MAX_MANIFEST_BYTES} bytes"
-            )
         with open(path, encoding="utf-8") as handle:
-            data = yaml.safe_load(handle) or {}
+            size = os.fstat(handle.fileno()).st_size
+            if size > MAX_MANIFEST_BYTES:
+                raise BtrbakError(
+                    f"meta.yaml is {size} bytes; refusing to load a manifest larger "
+                    f"than {MAX_MANIFEST_BYTES} bytes"
+                )
+            text = handle.read(MAX_MANIFEST_BYTES + 1)
+            if len(text) > MAX_MANIFEST_BYTES:
+                raise BtrbakError(
+                    f"meta.yaml exceeds {MAX_MANIFEST_BYTES} bytes; refusing to load"
+                )
+            data = yaml.safe_load(text) or {}
+        if not data:
+            # An empty (or blank/comment-only) file is a not-yet-initialised
+            # manifest, exactly like a missing one; `touch <dest>/meta.yaml` must
+            # not strand `run` on a "version: None" error.
+            return default()
+        if not isinstance(data, dict):
+            raise BtrbakError("meta.yaml must be a mapping")
+        # ``type(...) is not int`` (not ``is``/``==``) so a hand-edited
+        # ``version: 1.0`` or ``true`` (both compare equal to ``1`` in Python)
+        # is rejected rather than accepted.
+        if type(data.get("version")) is not int or data.get("version") != VERSION:
+            raise BtrbakError(f"unsupported meta.yaml version: {data.get('version')!r}")
+        profiles = data.get("profiles")
+        if profiles is None:
+            profiles = {}
+            data["profiles"] = profiles
+        if not isinstance(profiles, dict):
+            raise BtrbakError("meta.yaml 'profiles' must be a mapping")
+        # Iterate a snapshot of the items: a self-referential mapping (a YAML
+        # alias) mutates the dict as we normalise its entries, which would
+        # otherwise raise ``RuntimeError: dictionary changed size during
+        # iteration``.
+        for name, entry in list(profiles.items()):
+            if not isinstance(entry, dict):
+                raise BtrbakError(f"meta.yaml profile {name!r} must be a mapping")
+            snapshots = entry.get("snapshots")
+            if snapshots is None:
+                entry["snapshots"] = []
+                continue
+            if not isinstance(snapshots, list):
+                raise BtrbakError(
+                    f"meta.yaml profile {name!r} 'snapshots' must be a list"
+                )
+            _validate_snapshots(name, snapshots)
+        return data
+    except BtrbakError:
+        raise
     except yaml.YAMLError as exc:
         raise BtrbakError(f"invalid meta.yaml: {exc}")
     except (UnicodeDecodeError, OSError) as exc:
         # A non-UTF-8 or unreadable manifest must surface as a one-line error,
         # not a traceback (e.g. after a partial/binary write).
         raise BtrbakError(f"cannot read meta.yaml: {exc}")
-    if not data:
-        # An empty (or blank/comment-only) file is a not-yet-initialised
-        # manifest, exactly like a missing one; `touch <dest>/meta.yaml` must
-        # not strand `run` on a "version: None" error.
-        return default()
-    if not isinstance(data, dict):
-        raise BtrbakError("meta.yaml must be a mapping")
-    # ``is`` (not ``==``) so a hand-edited ``version: 1.0`` or ``true`` (both
-    # compare equal to ``1`` in Python) is rejected rather than accepted.
-    if data.get("version") is not VERSION:
-        raise BtrbakError(f"unsupported meta.yaml version: {data.get('version')!r}")
-    profiles = data.get("profiles")
-    if profiles is None:
-        profiles = {}
-        data["profiles"] = profiles
-    if not isinstance(profiles, dict):
-        raise BtrbakError("meta.yaml 'profiles' must be a mapping")
-    for name, entry in profiles.items():
-        if not isinstance(entry, dict):
-            raise BtrbakError(f"meta.yaml profile {name!r} must be a mapping")
-        snapshots = entry.get("snapshots")
-        if snapshots is None:
-            entry["snapshots"] = []
-            continue
-        if not isinstance(snapshots, list):
-            raise BtrbakError(
-                f"meta.yaml profile {name!r} 'snapshots' must be a list"
-            )
-        _validate_snapshots(name, snapshots)
-    return data
+    except (RecursionError, RuntimeError, ValueError) as exc:
+        # yaml has no nesting/alias limit of its own: a deeply nested or
+        # self-referential document, or a malformed scalar, surfaces here as a
+        # one-line error rather than a traceback.
+        raise BtrbakError(f"invalid meta.yaml: {exc}")
 
 
 def _validate_snapshots(profile_name: str, snapshots: list) -> None:
@@ -110,12 +128,15 @@ def _validate_snapshots(profile_name: str, snapshots: list) -> None:
         # Validate scalar fields whose types the rest of the code relies on,
         # so a malformed entry fails here with a clear message instead of as an
         # AttributeError/TypeError deep inside a backup or restore.
-        _validate_scalar(snap, "created", where, sid, int)
-        _validate_scalar(snap, "size", where, sid, int)
+        _validate_scalar(snap, "created", where, sid, int, non_negative=True)
+        _validate_scalar(snap, "size", where, sid, int, non_negative=True)
         _validate_scalar(snap, "committed", where, sid, bool)
         _validate_scalar(snap, "local_deleted", where, sid, bool)
-        _validate_scalar(snap, "file", where, sid, str)
         _validate_scalar(snap, "sha256", where, sid, str)
+        if snap.get("file") is not None:
+            _validate_file(snap.get("file"), where, sid)
+        if snap.get("uuid") is not None and not isinstance(snap.get("uuid"), str):
+            raise BtrbakError(f"{where} ({sid}) 'uuid' must be a string")
         uploads = snap.get("uploads", [])
         if uploads is None:
             uploads = []
@@ -143,6 +164,14 @@ def _validate_snapshots(profile_name: str, snapshots: list) -> None:
 _ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
+#: A single path component of a ``<profile>/<id>.send``-style ``file``.
+_FILE_COMPONENT_RE = re.compile(r"\A[A-Za-z0-9._-]+\Z")
+
+#: A compression level as written by hand in a manifest: a single optional
+#: sign followed by ASCII digits, which ``int()`` always accepts.
+_LEVEL_RE = re.compile(r"\A[+-]?\d+\Z", re.ASCII)
+
+
 def _validate_id(sid: str, where: str) -> None:
     if not _ID_RE.match(sid):
         raise BtrbakError(
@@ -151,7 +180,24 @@ def _validate_id(sid: str, where: str) -> None:
         )
 
 
-def _validate_scalar(snap: dict, key: str, where: str, sid: str, expected, *, positive: bool = False) -> None:
+def _validate_file(value, where: str, sid: str) -> None:
+    """Reject unsafe ``file`` values.
+
+    ``file`` names the offsite copy as a single relative path
+    (``<profile>/<id>.send``); a manifest is untrusted input and the value is
+    used verbatim in remote paths, so reject an absolute path or a ``.``/``..``
+    or empty component rather than let one smuggle a path traversal.
+    """
+    if not isinstance(value, str) or not value:
+        raise BtrbakError(f"{where} ({sid}) 'file' must be a non-empty string")
+    parts = value.split("/")
+    if any(
+        part in (".", "..") or not _FILE_COMPONENT_RE.match(part) for part in parts
+    ):
+        raise BtrbakError(f"{where} ({sid}) has unsafe 'file' {value!r}")
+
+
+def _validate_scalar(snap: dict, key: str, where: str, sid: str, expected, *, non_negative: bool = False) -> None:
     if key not in snap or snap[key] is None:
         return
     value = snap[key]
@@ -161,8 +207,10 @@ def _validate_scalar(snap: dict, key: str, where: str, sid: str, expected, *, po
         valid = isinstance(value, expected)
     if not valid:
         raise BtrbakError(f"{where} ({sid}) {key!r} must be a {expected.__name__}")
-    if positive and expected is int and value <= 0:
-        raise BtrbakError(f"{where} ({sid}) {key!r} must be positive")
+    # ``0`` is a legitimate sentinel (``created`` defaults to 0 for missing/
+    # malformed values), so reject only negative values here.
+    if non_negative and expected is int and value < 0:
+        raise BtrbakError(f"{where} ({sid}) {key!r} must not be negative")
 
 
 def _validate_codec(where: str, sid: str, key: str, value):
@@ -192,12 +240,21 @@ def _validate_codec(where: str, sid: str, key: str, value):
         raise BtrbakError(
             f"{where} ({sid}) {key!r} must have a non-empty string 'algorithm'"
         )
+    expected = "xz" if key == "compression" else "age"
+    if algorithm != expected:
+        raise BtrbakError(
+            f"{where} ({sid}) {key!r} algorithm must be {expected!r}, "
+            f"not {algorithm!r}"
+        )
     if key == "compression":
         level = value.get("level", 6)
         # send.send_snapshot coerces the level with int(); a non-numeric value
-        # here would raise ValueError from inside a backup or a restore.
+        # here would raise ValueError from inside a backup or a restore. The
+        # anchored regex accepts only what ``int()`` is guaranteed to parse (a
+        # single optional sign followed by ASCII digits), so ``--3``/``++3``
+        # are rejected here instead of crashing inside ``send``.
         if isinstance(level, bool) or not isinstance(level, int):
-            if not (isinstance(level, str) and level.lstrip("+-").isdigit()):
+            if not (isinstance(level, str) and _LEVEL_RE.match(level)):
                 raise BtrbakError(
                     f"{where} ({sid}) 'compression.level' must be an integer, "
                     f"not {level!r}"
@@ -288,9 +345,19 @@ def add_snapshot(meta: dict, name: str, entry: dict) -> None:
 
 
 def remove_snapshot(meta: dict, name: str, snapshot_id: str) -> None:
-    entry = profile(meta, name)
+    entry = meta["profiles"].get(name)
+    if entry is None:
+        return
     snaps = entry.get("snapshots", [])
     removed = next((snap for snap in snaps if snap.get("id") == snapshot_id), None)
+    if removed is not None and removed.get("parent") is None:
+        for snap in snaps:
+            if snap.get("parent") == snapshot_id:
+                raise BtrbakError(
+                    f"cannot remove snapshot {snapshot_id!r} from profile "
+                    f"{name!r}: it has dependents and no parent of its own to "
+                    "re-graft them onto"
+                )
     entry["snapshots"] = [
         snap for snap in snaps if snap.get("id") != snapshot_id
     ]
@@ -299,7 +366,8 @@ def remove_snapshot(meta: dict, name: str, snapshot_id: str) -> None:
         # stays valid: ``btrfs send -p`` accepts any ancestor, so parenting a
         # child onto its (former) grandparent yields a restorable stream and
         # avoids a dangling ``parent`` reference to a snapshot that no longer
-        # exists.
+        # exists. (The case where the removed entry has no parent of its own
+        # was rejected above: it would strand the child on ``None``.)
         new_parent = removed.get("parent")
         for snap in entry["snapshots"]:
             if snap.get("parent") == snapshot_id:
@@ -320,13 +388,14 @@ def created(snapshot: dict) -> int:
 def committed(snapshot: dict) -> bool:
     # ``is True`` (not truthiness): a hand-edited ``committed: "false"`` string
     # is truthy and used to silently flip a snapshot's state.
-    if snapshot.get("committed") is True:
-        return True
-    if snapshot.get("local_deleted") is True:
-        return True
     if snapshot.get("type") == "local":
         return True
     uploads = snapshot.get("uploads", [])
+    if snapshot.get("committed") is True or snapshot.get("local_deleted") is True:
+        # The marker alone is not enough: an upload that never reached
+        # "complete" means the offsite copy is missing, so the snapshot must
+        # not be treated as committed (and must not be pruned).
+        return all(upload.get("status") == "complete" for upload in uploads)
     return bool(uploads) and all(upload.get("status") == "complete" for upload in uploads)
 
 

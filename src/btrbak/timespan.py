@@ -18,7 +18,9 @@ _UNITS = {
     "y": 365 * 86400,
 }
 
-_PATTERN = re.compile(r"^(\d+)(s|min|h|d|w|mo|y)$")
+#: ``mo`` and ``y`` are calendar approximations (30 and 365 days), not aligned
+#: to real calendar months/years.
+_PATTERN = re.compile(r"^(\d+)(s|min|h|d|w|mo|y)$", re.ASCII)
 
 
 def is_never(seconds: int) -> bool:
