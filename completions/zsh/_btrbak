@@ -188,6 +188,35 @@ _btrbak_forget() {
   esac
 }
 
+_btrbak_gdrive_authorize() {
+  local context state line
+  typeset -A opt_args
+  _arguments -C \
+    '--client-secret=[downloaded OAuth client JSON (Desktop app) from Google Cloud]:path:_files' \
+    '--token=[where to write the credentials]:path:_files' \
+    '--console[use the copy/paste code flow instead of a local web server]' \
+    $_btrbak_common_opts \
+    && return
+}
+
+_btrbak_gdrive() {
+  local context state line
+  typeset -A opt_args
+  _arguments -C \
+    $_btrbak_common_opts \
+    '1:gdrive command:->gcmd' \
+    '*::arg:->args' \
+    && return
+  case $state in
+    gcmd) _values 'gdrive command' 'authorize[obtain OAuth credentials for a personal Google account]' ;;
+    args)
+      case $line[1] in
+        authorize) _btrbak_gdrive_authorize ;;
+      esac
+      ;;
+  esac
+}
+
 _btrbak() {
   local context state line curcontext="$curcontext"
   typeset -A opt_args
@@ -205,7 +234,8 @@ _btrbak() {
         'verify[check remote files against the manifest]' \
         'list[list snapshots and backups]' \
         'restore[restore a snapshot chain]' \
-        'forget[drop a stuck snapshot entry]'
+        'forget[drop a stuck snapshot entry]' \
+        'gdrive[Google Drive helper commands]'
       ;;
     args)
       case $line[1] in
@@ -215,6 +245,7 @@ _btrbak() {
         list) _btrbak_list ;;
         restore) _btrbak_restore ;;
         forget) _btrbak_forget ;;
+        gdrive) _btrbak_gdrive ;;
       esac
       ;;
   esac

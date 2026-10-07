@@ -19,3 +19,8 @@ PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
+LockPersonality=yes
+# AF_UNIX for local sockets, AF_INET/AF_INET6 for the gdrive/local remote
+# uploads this service performs.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryDenyWriteExecute=yes

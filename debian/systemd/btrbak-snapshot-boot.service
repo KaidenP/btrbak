@@ -18,6 +18,10 @@ PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
+LockPersonality=yes
+# Local snapshots only; no network access is required.
+RestrictAddressFamilies=AF_UNIX
+MemoryDenyWriteExecute=yes
 
 [Install]
 WantedBy=multi-user.target

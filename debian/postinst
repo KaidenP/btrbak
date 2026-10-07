@@ -7,7 +7,6 @@ case "$1" in
             deb-systemd-helper enable btrbak.timer >/dev/null || true
             deb-systemd-helper enable btrbak-snapshot-boot.service >/dev/null || true
             deb-systemd-invoke start btrbak.timer >/dev/null || true
-            deb-systemd-invoke start btrbak-snapshot-boot.service >/dev/null || true
         fi
         ;;
 esac

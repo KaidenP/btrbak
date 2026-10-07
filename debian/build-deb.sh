@@ -164,6 +164,13 @@ install -m 0755 "$ROOT/debian/postinst" "$STAGE/DEBIAN/postinst"
 install -m 0755 "$ROOT/debian/prerm" "$STAGE/DEBIAN/prerm"
 install -m 0755 "$ROOT/debian/postrm" "$STAGE/DEBIAN/postrm"
 
+# --- reproducible mtimes -------------------------------------------------
+# Normalize every staged file (including the generated DEBIAN/* metadata) to
+# a fixed mtime so the .deb is bit-for-bit reproducible. `-h` avoids following
+# symlinks (none are expected here); @0 is the Unix epoch when
+# SOURCE_DATE_EPOCH is unset.
+find "$STAGE" -exec touch -h -d "@${SOURCE_DATE_EPOCH:-0}" {} +
+
 # --- build -----------------------------------------------------------------
 mkdir -p "$ROOT/dist"
 dpkg-deb --build --root-owner-group "$STAGE" "$ROOT/dist/$PACKAGE"

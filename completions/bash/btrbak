@@ -8,7 +8,7 @@ _btrbak_command() {
     for w in "${words[@]:1}"; do
         [[ $w == -* ]] && continue
         case $w in
-            config|run|verify|list|restore|forget) printf '%s\n' "$w"; return ;;
+            config|run|verify|list|restore|forget|gdrive) printf '%s\n' "$w"; return ;;
         esac
     done
 }
@@ -145,13 +145,28 @@ _btrbak() {
     cmd=$(_btrbak_command)
 
     if [[ -z $cmd ]]; then
-        COMPREPLY=($(compgen -W 'config run verify list restore forget -v --verbose -h --help' -- "$cur"))
+        COMPREPLY=($(compgen -W 'config run verify list restore forget gdrive -v --verbose -h --help' -- "$cur"))
         return
     fi
 
     case $cmd in
         config)
             COMPREPLY=($(compgen -W 'check -v --verbose -h --help' -- "$cur"))
+            return
+            ;;
+        gdrive)
+            local has_authorize= i
+            for ((i = 1; i < cword; i++)); do
+                if [[ ${words[i]} == authorize ]]; then
+                    has_authorize=1
+                    break
+                fi
+            done
+            if [[ -n $has_authorize || $cur == -* ]]; then
+                COMPREPLY=($(compgen -W '--client-secret --token --console -v --verbose -h --help' -- "$cur"))
+            else
+                COMPREPLY=($(compgen -W 'authorize -v --verbose -h --help' -- "$cur"))
+            fi
             return
             ;;
     esac

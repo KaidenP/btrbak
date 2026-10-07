@@ -3,5 +3,11 @@
 // Runs the `apt` group from /etc/btrbak/groups.yaml via
 // /usr/lib/btrbak/btrbak-apt-pre.  The group is empty by default, so this is
 // a no-op until members are added there.
+//
+// The hook is invoked WITHOUT `|| true`: it exits 0 when it intentionally
+// skips (a fresh snapshot marker from an earlier dpkg run in this same
+// transaction), so the normal no-op case never blocks apt. A genuine snapshot
+// failure exits non-zero and aborts the transaction, which is the intended
+// visible-failure policy.
 
-DPkg::Pre-Invoke { "/usr/lib/btrbak/btrbak-apt-pre || true"; };
+DPkg::Pre-Invoke { "/usr/lib/btrbak/btrbak-apt-pre"; };

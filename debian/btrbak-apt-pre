@@ -6,26 +6,43 @@
 
 set -eu
 
-MARKER=/var/tmp/btrbak-apt-pre.stamp
+# The marker lives under /run (tmpfs, cleared on reboot) in a root-only
+# directory so an unprivileged user cannot pre-create a symlink and redirect
+# the dedup stamp. /run is itself root-owned, so only root can create this
+# entry; mkdir -p fails if a plain file already exists at the path.
+MARKER_DIR=/run/btrbak
+MARKER=$MARKER_DIR/apt-pre.stamp
+
 # A single apt transaction (e.g. a large dist-upgrade) can run dpkg for far
 # longer than the original 600 s window, which would snapshot again
 # mid-transaction. One hour covers realistic transactions; the trade-off is
 # that two *separate* apt runs started within the window share one snapshot.
 TTL_SECONDS=3600
+TTL_MINUTES=$((TTL_SECONDS / 60))
 
-now=$(date +%s)
-if [ -f "$MARKER" ]; then
-    mtime=$(stat -c %Y "$MARKER" 2>/dev/null || echo 0)
-    if [ $((now - mtime)) -lt "$TTL_SECONDS" ]; then
-        exit 0
-    fi
+if ! mkdir -p "$MARKER_DIR"; then
+    echo "btrbak-apt-pre: cannot create $MARKER_DIR; aborting" >&2
+    exit 1
+fi
+chmod 0700 "$MARKER_DIR"
+
+# A fresh marker means an earlier dpkg run in this same apt transaction
+# already snapshotted; skip quietly so apt is not blocked for the normal
+# no-op case. find is used instead of GNU-only `stat -c %Y` so this also
+# works on non-GNU userlands.
+if [ -f "$MARKER" ] && [ -n "$(find "$MARKER" -mmin -"$TTL_MINUTES" -print 2>/dev/null)" ]; then
+    exit 0
+fi
+
+# Run the snapshot first and touch the marker only on success, so a failed
+# snapshot does not suppress a retry for the rest of the TTL window.
+if ! /usr/bin/btrbak run --group apt --force; then
+    exit 1
 fi
 
 if ! touch "$MARKER" 2>/dev/null; then
-    # The caller invokes us via `|| true`, so without this warning a failed
-    # marker write (e.g. a read-only /var/tmp) would silently skip the
-    # snapshot with no way for the admin to notice.
-    echo "btrbak-apt-pre: cannot write marker $MARKER; skipping snapshot" >&2
-    exit 1
+    # The snapshot already succeeded, so only dedup is degraded; the next apt
+    # transaction may simply snapshot again.
+    echo "btrbak-apt-pre: warning: cannot write marker $MARKER" >&2
 fi
-exec /usr/bin/btrbak run --group apt --force
+exit 0

@@ -4,9 +4,11 @@ Section: admin
 Priority: optional
 Architecture: all
 Installed-Size: @INSTALLED_SIZE@
-Depends: python3 (>= 3.10), python3-yaml (>= 6), python3-googleapi, python3-google-auth, python3-google-auth-oauthlib, btrfs-progs
+Depends: python3 (>= 3.10), python3-yaml (>= 5.4), python3-googleapi, python3-google-auth, python3-google-auth-oauthlib, btrfs-progs
 Recommends: age
 Maintainer: Kaiden <11036039+KaidenP@users.noreply.github.com>
+Homepage: https://github.com/KaidenP/btrbak
+Standards-Version: 4.7.0
 Description: btrfs snapshot and offsite backup utility
  btrbak creates read-only btrfs snapshots, ships incremental offsite
  backups with btrfs send, verifies remote objects against a local
