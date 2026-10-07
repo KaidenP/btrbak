@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -104,6 +105,11 @@ def load_auth(path=None) -> dict:
         raise ConfigError(f"cannot read {path}: {exc}")
     if not isinstance(data, dict):
         raise ConfigError(f"auth file must be a mapping: {path}")
+    for key, value in data.items():
+        if not isinstance(value, (str, dict)):
+            raise ConfigError(
+                f"auth value for {key!r} must be a string or a mapping: {path}"
+            )
     return data
 
 
@@ -149,6 +155,12 @@ def _require_absolute(value, label: str, path) -> None:
 
 def load_config(path, auth: dict) -> Config:
     path = Path(path)
+    # The stem becomes ``Config.name`` and feeds staging/lock path components,
+    # so it gets the same one-component safe-name treatment as profile names.
+    if not _is_safe_name(path.stem):
+        raise ConfigError(
+            f"config file name {path.stem!r} is not allowed; {_NAME_HINT}"
+        )
     try:
         with open(path, encoding="utf-8") as handle:
             data = yaml.safe_load(handle)
@@ -165,8 +177,11 @@ def load_config(path, auth: dict) -> Config:
         raise ConfigError(f"{path}: 'src' and 'dest' are required")
     _require_absolute(src, "src", path)
     _require_absolute(dest, "dest", path)
-    if data.get("tmpdir"):
-        _require_absolute(data["tmpdir"], "tmpdir", path)
+    tmpdir = data.get("tmpdir")
+    if tmpdir is not None and not isinstance(tmpdir, str):
+        raise ConfigError(f"{path}: 'tmpdir' must be a string path, not {tmpdir!r}")
+    if tmpdir:
+        _require_absolute(tmpdir, "tmpdir", path)
 
     profiles_raw = data.get("profiles")
     if not isinstance(profiles_raw, dict) or not profiles_raw:
@@ -213,19 +228,25 @@ def discover_config_paths(subvol=None) -> list[Path]:
 
 
 def _is_confined_config_file(path: Path, conf_dir: Path) -> bool:
-    """Return True when *path* is a regular file resolving inside *conf_dir*.
+    """Return True when *path* is a regular file confined to *conf_dir*.
 
     Directories named ``*.yaml`` are skipped (they would otherwise surface as
-    an ``IsADirectoryError`` later), and symlinks whose target escapes the
-    config directory are ignored so a local user cannot substitute an
-    arbitrary file as a profile.
+    an ``IsADirectoryError`` later). A symlink whose target is not a regular
+    file or that resolves outside *conf_dir* is reported as a ``ConfigError``
+    instead of being silently dropped, matching :func:`config_path_for_subvol`.
     """
     if not path.is_file():
+        if path.is_symlink():
+            raise ConfigError(f"config path is not a regular file: {path}")
         return False
-    try:
-        return path.resolve().parent == conf_dir
-    except OSError:
-        return False
+    if path.is_symlink():
+        try:
+            resolved = path.resolve()
+        except OSError:
+            raise ConfigError(f"cannot resolve config path: {path}") from None
+        if resolved.parent != conf_dir:
+            raise ConfigError(f"config path escapes {conf_dir}: {path}")
+    return True
 
 
 def discover_configs_tolerant(subvol=None) -> list[tuple[Path, Config | None, ConfigError | None]]:
@@ -441,6 +462,26 @@ def _parse_profile(name, praw, auth, path) -> Profile:
     )
 
 
+def _canonical(value):
+    """Return a canonical, JSON-serializable form of *value*.
+
+    Nested mappings are recursively key-sorted and lists of mappings are
+    sorted by their canonical JSON so two logically-identical values serialize
+    identically regardless of insertion order. Non-serializable leaves are
+    stringified with ``default=str``.
+    """
+    if isinstance(value, dict):
+        return {k: _canonical(v) for k, v in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        items = [_canonical(v) for v in value]
+        if items and all(isinstance(v, dict) for v in items):
+            items.sort(key=lambda v: json.dumps(v, sort_keys=True, default=str))
+        return items
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
 def _parse_remote(entry, auth, path, profile) -> RemoteSpec:
     if not isinstance(entry, dict):
         raise ConfigError(f"{path}: profile {profile!r}: remote must be a mapping")
@@ -470,13 +511,26 @@ def _parse_remote(entry, auth, path, profile) -> RemoteSpec:
                 f"{path}: profile {profile!r}: remote 'name' must be a string, "
                 f"not {name!r}"
             )
+        if name.startswith("hash:"):
+            raise ConfigError(
+                f"{path}: profile {profile!r}: remote 'name' cannot start with "
+                f"'hash:' (reserved for computed ids): {name!r}"
+            )
+        if not _is_safe_name(name):
+            raise ConfigError(
+                f"{path}: profile {profile!r}: remote 'name' {name!r} is not "
+                f"allowed; {_NAME_HINT}"
+            )
         rid = name
     else:
         canonical = {k: v for k, v in resolved.items() if k not in ("auth", "name")}
         digest = hashlib.sha256(
-            json.dumps(canonical, sort_keys=True, default=str).encode()
+            json.dumps(_canonical(canonical), sort_keys=True, default=str).encode()
         ).hexdigest()[:16]
         rid = f"hash:{digest}"
+
+    # `name` only selects the stable manifest id; it is not a remote setting.
+    resolved.pop("name", None)
 
     return RemoteSpec(id=rid, type=rtype, settings=resolved)
 
@@ -486,12 +540,11 @@ def remote_identity(spec) -> str:
 
     Two remotes collapse to the same identity only when their non-secret
     resolved settings match. ``auth`` is excluded (it is credential material
-    and is not part of endpoint identity), while ``name`` is intentionally
-    included so two otherwise-identical endpoints with different stable names
-    never alias each other.
+    and is not part of endpoint identity); ``name`` is not part of the
+    endpoint either -- it only selects the stable manifest id.
     """
     settings = {k: v for k, v in spec.settings.items() if k != "auth"}
-    return json.dumps(settings, sort_keys=True, default=str)
+    return json.dumps(_canonical(settings), sort_keys=True, default=str)
 
 
 def _normalize_compression(compression, path) -> dict | None:
@@ -522,11 +575,18 @@ def _normalize_encryption(encryption, path) -> dict | None:
     identity = encryption.get("identity")
     if identity:
         _require_absolute(identity, "encryption.identity", path)
+        identity = Path(str(identity)).expanduser()
+    normalized_recipients = []
     for recipient in recipients:
         _require_absolute_recipient(recipient, path)
+        text = str(recipient)
+        if text.startswith("age1"):
+            normalized_recipients.append(text)
+        else:
+            normalized_recipients.append(str(Path(text).expanduser()))
     return {
         "algorithm": "age",
-        "recipients": [str(r) for r in recipients],
+        "recipients": normalized_recipients,
         "identity": str(identity) if identity else None,
     }
 
@@ -596,10 +656,12 @@ def validate(config: Config, check_remotes=True, check_nesting=True):
                 errors.append(
                     f"dest must be on the same btrfs filesystem as src: {config.dest}"
                 )
-        if check_nesting and is_nested(config.dest, config.src):
-            warnings.append(
-                f"dest is nested inside src ({config.dest}); snapshots may be picked up as nested subvolumes"
-            )
+    # Nesting is a pure path check that needs no btrfs, so report it even
+    # when btrfs-progs is absent or src is not (yet) a subvolume.
+    if check_nesting and is_nested(config.dest, config.src):
+        warnings.append(
+            f"dest is nested inside src ({config.dest}); snapshots may be picked up as nested subvolumes"
+        )
 
     _check_creatable(config.tmpdir, "tmpdir", errors)
     _check_creatable(config.dest, "dest", errors)
@@ -632,9 +694,16 @@ def validate(config: Config, check_remotes=True, check_nesting=True):
         if not age_available:
             errors.append("encryption is enabled but the 'age' binary was not found")
         if config.encryption["identity"]:
-            _check_permissions(
-                config.encryption["identity"], "age identity file", warnings
-            )
+            identity_path = Path(config.encryption["identity"]).expanduser()
+            if not identity_path.is_file():
+                errors.append(
+                    f"age identity file does not exist or is not a regular file: "
+                    f"{identity_path}"
+                )
+            else:
+                _check_permissions(
+                    config.encryption["identity"], "age identity file", warnings
+                )
         else:
             # Sending needs only recipients; restoring needs the private
             # identity, so a profile without one backs up cleanly and can
@@ -701,8 +770,16 @@ def _check_creatable(path: Path, label: str, errors: list[str]) -> None:
     # os.access(W_OK) reports success for root even on read-only mounts, so
     # this is a heuristic (the real failure surfaces mid-run); keep it but
     # don't treat it as authoritative.
-    if path.exists():
-        if not path.is_dir():
+    path = Path(path)
+    try:
+        st = os.lstat(path)
+    except OSError:
+        st = None
+    if st is not None and stat.S_ISLNK(st.st_mode):
+        errors.append(f"{label} is a symlink and will be refused at runtime: {path}")
+        return
+    if st is not None:
+        if not stat.S_ISDIR(st.st_mode):
             errors.append(f"{label} is not a directory: {path}")
         elif not os.access(path, os.W_OK):
             errors.append(f"{label} is not writable: {path}")
@@ -713,10 +790,19 @@ def _check_creatable(path: Path, label: str, errors: list[str]) -> None:
 
 
 def _check_permissions(path, label: str, warnings: list[str]) -> None:
-    """Warn when a sensitive file is not ``0600``."""
+    """Warn when a sensitive file is not ``0600`` or not owned by the caller."""
     path = Path(path)
-    if not path.exists():
+    try:
+        st = os.lstat(path)
+    except OSError:
         return
-    mode = path.stat().st_mode & 0o777
+    if stat.S_ISLNK(st.st_mode):
+        warnings.append(f"{label} is a symlink and will not be followed: {path}")
+        return
+    mode = st.st_mode & 0o777
     if mode != 0o600:
         warnings.append(f"{label} should be 0600 but is {oct(mode)[2:]}: {path}")
+    if st.st_uid != os.geteuid():
+        warnings.append(
+            f"{label} is owned by uid {st.st_uid}, expected {os.geteuid()}: {path}"
+        )
