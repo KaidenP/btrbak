@@ -12,6 +12,7 @@ from .util import (
     RESTORE_SCRATCH,
     is_btrfs,
     is_subvolume,
+    private_dir,
     scratch_dir,
     sha256_file,
     subvolume_uuid,
@@ -115,6 +116,11 @@ def _resume_point(target: Path, chain: list[str], meta: dict, profile_name: str)
             )
         expected = (by_id.get(sid) or {}).get("uuid")
         if not expected:
+            print(
+                f"warning: snapshot {sid} has no recorded uuid; resuming on "
+                "name only, which may be incorrect",
+                file=sys.stderr,
+            )
             continue
         actual = subvolume_uuid(entry)
         if actual != expected:
@@ -212,10 +218,10 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
     # Create the target only once it is known to be usable: every manifest
     # check has passed and the first stream is downloaded and verified. A
     # restore rejected at any earlier point therefore never leaves an empty
-    # directory tree behind.
-    target.mkdir(parents=True, exist_ok=True)
-
+    # directory tree behind. The mkdir and the replay both live under the one
+    # finally so a mkdir failure still cleans up the staged download.
     try:
+        private_dir(target)
         for index, sid in enumerate(pending):
             snap = by_id[sid]
             tmpfile = staged if index == 0 else tmpdir / f"{sid}.send"
@@ -227,6 +233,14 @@ def restore(config, profile_name, snapshot_id, target, meta, tmpdir) -> None:
                 # concurrent writer to the scratch dir must not substitute a
                 # different stream in between (BTR-014).
                 verify_download(snap, tmpfile)
+                # Narrow the check→receive TOCTOU: _resume_point already
+                # skipped links present at startup, but a subvolume can still
+                # appear at the link path before btrfs receive runs.
+                if os.path.lexists(target / sid):
+                    raise BtrbakError(
+                        f"restore target already contains {target / sid}; "
+                        "remove it before restoring"
+                    )
                 compression, encryption = codec_for_snapshot(snap, config)
                 send.restore_stream(tmpfile, target, compression, encryption)
             finally:

@@ -256,7 +256,7 @@ def test_send_snapshot_incremental_uses_parent_flag(tmp_path, monkeypatch):
 
     send.send_snapshot(snap, parent, out)
 
-    assert captured["cmd"] == ["btrfs", "send", "-p", str(parent), str(snap)]
+    assert captured["cmd"] == ["btrfs", "send", "-p", str(parent), "--", str(snap)]
 
 
 # --- restore-side decryption -----------------------------------------------

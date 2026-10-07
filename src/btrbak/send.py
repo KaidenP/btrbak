@@ -6,6 +6,7 @@ encryption shells out to the ``age`` binary.
 
 import lzma
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -42,26 +43,34 @@ def _use_age(encryption) -> bool:
     return bool(encryption and encryption.get("algorithm") == "age")
 
 
+_LEVEL_RE = re.compile(r"\A[+-]?\d+\Z", re.ASCII)
+
+
 def _codec_level(compression) -> int:
     """Return the xz preset from a ``compression`` record.
 
-    Accepts a numeric string because a manifest written by hand (or by a
-    different version) may quote the level; anything else raises
-    :class:`BtrbakError` rather than a bare :class:`ValueError`. ``manifest``
-    validation already rejects the hopeless cases up front.
+    Accepts an integer (never ``bool``) or a signed numeric string, because a
+    manifest written by hand (or by a different version) may quote the level;
+    anything else raises :class:`BtrbakError` rather than a bare
+    :class:`ValueError`. ``manifest`` validation already rejects the hopeless
+    cases up front.
     """
     level = compression.get("level", 6)
-    try:
-        value = int(level)
-    except (TypeError, ValueError) as exc:
-        raise BtrbakError(
-            f"invalid xz compression level {level!r}; expected an integer 0-9"
-        ) from exc
-    if not 0 <= value <= 9:
+    if isinstance(level, bool) or not isinstance(level, (int, str)):
         raise BtrbakError(
             f"invalid xz compression level {level!r}; expected an integer 0-9"
         )
-    return value
+    if isinstance(level, str):
+        if not _LEVEL_RE.match(level):
+            raise BtrbakError(
+                f"invalid xz compression level {level!r}; expected an integer 0-9"
+            )
+        level = int(level)
+    if not 0 <= level <= 9:
+        raise BtrbakError(
+            f"invalid xz compression level {level!r}; expected an integer 0-9"
+        )
+    return level
 
 
 def compress_file(src, dst, preset: int = 6) -> None:
@@ -106,16 +115,27 @@ def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None)
     use_xz = _use_xz(compression)
     use_age = _use_age(encryption)
 
+    # A prior run killed hard (SIGKILL, power loss) leaves stale intermediates
+    # behind because they are only cleaned by the finally below; sweep them
+    # before writing fresh ones.
+    for suffix in (".raw", ".xz"):
+        try:
+            (work / (out_path.name + suffix)).unlink()
+        except OSError:
+            pass
+
     send_cmd = ["btrfs", "send"]
     if parent:
         send_cmd += ["-p", str(parent)]
-    send_cmd.append(str(snapshot))
+    send_cmd += ["--", str(snapshot)]
 
     intermediates = []
+    ok = False
     try:
         if not use_xz and not use_age:
             with open_private(out_path) as handle:
                 run(send_cmd, stdout=handle)
+            ok = True
             return
 
         raw = work / (out_path.name + ".raw")
@@ -159,9 +179,16 @@ def send_snapshot(snapshot, parent, out_path, compression=None, encryption=None)
             current.unlink(missing_ok=True)
         else:
             os.replace(current, out_path)
+        ok = True
     finally:
         for path in intermediates:
             path.unlink(missing_ok=True)
+        if not ok:
+            # A failed send must not leave a truncated out_path behind.
+            try:
+                out_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def restore_stream(send_file, target, compression=None, encryption=None) -> None:
@@ -178,8 +205,17 @@ def restore_stream(send_file, target, compression=None, encryption=None) -> None
             identity = encryption.get("identity")
             if not identity:
                 raise BtrbakError("encryption identity is required to restore")
+            if not os.path.isabs(str(identity)):
+                raise BtrbakError(
+                    f"encryption identity must be an absolute path: {identity!r}"
+                )
             decrypted = work / (send_file.name + ".dec")
             intermediates.append(decrypted)
+            # ``age -d -o`` opens its output with O_CREAT|O_TRUNC, so a
+            # pre-existing file (or a planted symlink) would be truncated or
+            # followed; remove it first so age always creates it fresh under
+            # the restrictive umask.
+            decrypted.unlink(missing_ok=True)
             _run_private_output(
                 ["age", "-d", "-i", str(identity), "-o", str(decrypted), str(current)]
             )
