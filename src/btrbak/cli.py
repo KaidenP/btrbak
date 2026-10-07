@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -199,25 +200,25 @@ def cmd_gdrive_authorize(args) -> int:
         )
         return 1
 
-    client_secret = Path(args.client_secret)
-    if not client_secret.is_file():
+    client_secret_file = Path(args.client_secret)
+    if not client_secret_file.is_file():
         print(
-            f"error: client secret file not found: {client_secret}",
+            f"error: client secret file not found: {client_secret_file}",
             file=sys.stderr,
         )
         return 1
 
     token_path = Path(args.token)
     try:
-        token_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    except OSError as exc:
+        util.private_dir(token_path.parent)
+    except (util.BtrbakError, OSError) as exc:
         print(
-            f"error: cannot create {token_path.parent}: {exc}", file=sys.stderr
+            f"error: cannot secure {token_path.parent}: {exc}", file=sys.stderr
         )
         return 1
 
     flow = InstalledAppFlow.from_client_secrets_file(
-        str(client_secret), scopes=["https://www.googleapis.com/auth/drive"]
+        str(client_secret_file), scopes=["https://www.googleapis.com/auth/drive"]
     )
     try:
         if args.console:
@@ -239,22 +240,29 @@ def cmd_gdrive_authorize(args) -> int:
         "token_uri": creds.token_uri,
         "scopes": creds.scopes,
     }
-    tmp = token_path.with_name(token_path.name + ".tmp")
     try:
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(token_path.parent), prefix=token_path.name + ".", suffix=".tmp"
+        )
+    except OSError as exc:
+        print(f"error: cannot create {token_path}: {exc}", file=sys.stderr)
+        return 1
+    tmp = Path(tmp_name)
+    try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, token_path)
     except OSError as exc:
         print(f"error: cannot write {token_path}: {exc}", file=sys.stderr)
         return 1
     finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     print(f"wrote credentials to {token_path}")
     print(
@@ -311,9 +319,6 @@ def _discover_group(group_name):
         except config_mod.ConfigError as exc:
             results.append((subvol, None, exc, set()))
             continue
-        if auth_error is not None:
-            results.append((path, None, auth_error, set()))
-            continue
         try:
             cfg = config_mod.load_config(path, auth)
         except config_mod.ConfigError as exc:
@@ -340,6 +345,8 @@ def _discover_group(group_name):
                 continue
             cfg = config_mod.select_profile_names(cfg, profile_names)
         results.append((path, cfg, None, configured))
+    if auth_error is not None:
+        results.append((config_mod.AUTH_PATH, None, auth_error, set()))
     return results
 
 
@@ -388,11 +395,11 @@ def cmd_run(args) -> int:
         # the real failure was reported above and must not be masked.
         raise config_mod.ConfigError(f"unknown profile: {args.profile!r}")
 
-    upload_failures = 0
+    run_failures = 0
     runtime_failures = 0
     for cfg, configured in selected_configs:
         try:
-            upload_failures += run_config(
+            run_failures += run_config(
                 cfg,
                 None,
                 args.force,
@@ -407,22 +414,24 @@ def cmd_run(args) -> int:
         except (util.BtrbakError, RemoteError, OSError) as exc:
             runtime_failures += 1
             print(f"error ({cfg.name}): {exc}", file=sys.stderr)
-    if upload_failures:
+    if run_failures:
         print(
-            f"warning: {upload_failures} upload(s) failed; see errors above",
+            f"warning: {run_failures} operation(s) failed; see errors above",
             file=sys.stderr,
         )
     if config_errors:
         return 2
-    return 1 if upload_failures or runtime_failures else 0
+    return 1 if run_failures or runtime_failures else 0
 
 
 def run_config(
     cfg, profile_filter, force, force_config, full, dry_run, configured=None
 ) -> int:
     selected = config_mod.filter_profiles(cfg, profile_filter)
+    # Remote reachability is validated per-profile in _prepare_profile so a
+    # single down remote cannot abort snapshots for unrelated profiles.
     errors, warnings = config_mod.validate(
-        selected, check_remotes=not dry_run, check_nesting=False
+        selected, check_remotes=False, check_nesting=False
     )
     if errors:
         raise config_mod.ConfigError("\n".join(errors))
@@ -462,7 +471,9 @@ def run_config(
         # is created, so a dry run that stayed silent about them would
         # under-report the work a real run does (§12).
         for pname, profile in selected.profiles.items():
+            current_ids = {spec.id for spec in profile.remotes}
             for snap in manifest.snapshots(meta, pname):
+                reconcile_uploads(snap, current_ids)
                 if manifest.committed(snap):
                     continue
                 remote_ids = [spec.id for spec in profile.remotes]
@@ -485,12 +496,14 @@ def run_config(
                         f"upload {snap.get('id')} to {', '.join(pending)}"
                     )
 
-        dry_run_config_sync(selected, collect_remotes(selected), force_config)
+        sync_failures = dry_run_config_sync(
+            selected, collect_remotes(selected), force_config
+        )
 
         for pname, profile in selected.profiles.items():
             for sid in retention.plan_prune(meta, pname, profile.keep, now_ts):
                 print(f"[dry-run] {selected.name}/{pname}: would prune snapshot {sid}")
-        return 0
+        return sync_failures or 0
 
     selected.dest.mkdir(parents=True, exist_ok=True)
     with util.exclusive_lock(selected.dest / ".btrbak.lock"):
@@ -499,7 +512,6 @@ def run_config(
         _warn_orphans(selected.name, meta, configured_profiles)
         ensure_profile_meta(meta, selected)
         by_profile = collect_remotes(selected)
-        sync_settings(selected, unique_remotes(by_profile), force_config)
 
         # Reap stale staging files only while holding the same advisory lock
         # `verify` and `restore` use, so a long-running restore can never have
@@ -514,6 +526,7 @@ def run_config(
         failures = 0
         for pname, profile in selected.profiles.items():
             try:
+                _prepare_profile(selected, profile, by_profile[pname], force_config)
                 failures += run_profile(selected, profile, meta, by_profile[pname], force, full)
             except (util.BtrbakError, RemoteError, OSError) as exc:
                 # One profile failing must not abort the rest of the run or
@@ -633,6 +646,10 @@ def run_profile(cfg, profile, meta, remotes, force, full) -> int:
         "uploads": [],
     }
     manifest.add_snapshot(meta, pname, entry)
+    # Persist the new entry before the (potentially long) send+upload phase so
+    # a hard interruption leaves a manifest record that retry_upload can
+    # complete on the next run, rather than an untracked subvolume.
+    manifest.save(cfg.dest / "meta.yaml", meta)
 
     if remotes:
         failures += perform_send_upload(cfg, profile, entry, snap_path, parent_id, remotes)
@@ -808,7 +825,10 @@ def prune(cfg, meta, by_profile, meta_path=None) -> None:
     """Delete expired snapshots and persist the manifest after each change.
 
     ``meta_path``, when provided, is rewritten after every manifest mutation so
-    an aborted prune never leaves on-disk state pointing at deleted subvolumes.
+    an aborted prune (a Python exception) never leaves on-disk state pointing
+    at deleted subvolumes. A hard kill (SIGKILL/power loss) between the local
+    delete and the following save can still leave a stale reference, which
+    self-heals on the next run.
     """
     now_ts = util.now()
     for pname, profile in cfg.profiles.items():
@@ -889,13 +909,25 @@ def _config_sync_state(remote, local_bytes, tmp) -> str:
     return "in-sync" if tmp.read_bytes() == local_bytes else "differs"
 
 
+def _prepare_profile(cfg, profile, remotes, force_config) -> None:
+    """Validate and sync one profile's remotes before it runs.
+
+    Reachability checks and ``config.yaml`` sync are scoped to a single
+    profile so a down remote fails only that profile, not every profile in the
+    config.
+    """
+    for spec, remote in remotes:
+        remote.validate()
+    sync_settings(cfg, remotes, force_config)
+
+
 def sync_settings(cfg, remotes, force_config) -> None:
     local_bytes = cfg.path.read_bytes()
     # scratch_dir removes the staging root again once the comparison file is
     # gone, so a run does not leave an empty directory behind in tmpdir.
     with util.scratch_dir(cfg.tmpdir / cfg.name, cfg.tmpdir) as staging:
         for spec, remote in remotes:
-            tmp = staging / "config.yaml.check"
+            tmp = staging / ".config.yaml.check"
             try:
                 state = _config_sync_state(remote, local_bytes, tmp)
             finally:
@@ -911,7 +943,7 @@ def sync_settings(cfg, remotes, force_config) -> None:
                 )
 
 
-def dry_run_config_sync(cfg, by_profile, force_config) -> None:
+def dry_run_config_sync(cfg, by_profile, force_config) -> int:
     """Report what ``sync_settings`` would do for each remote, without writing.
 
     This is the only remote access ``--dry-run`` performs and it is strictly
@@ -921,8 +953,9 @@ def dry_run_config_sync(cfg, by_profile, force_config) -> None:
     ``config.yaml`` aborts a real run unless ``--force-config`` is given.
     """
     local_bytes = cfg.path.read_bytes()
+    failures = 0
     with util.scratch_dir(cfg.tmpdir / cfg.name, cfg.tmpdir) as staging:
-        tmp = staging / "config.yaml.dry-run"
+        tmp = staging / ".config.yaml.dry-run"
         for spec, remote in unique_remotes(by_profile):
             try:
                 state = _config_sync_state(remote, local_bytes, tmp)
@@ -931,6 +964,7 @@ def dry_run_config_sync(cfg, by_profile, force_config) -> None:
                     f"[dry-run] could not read config.yaml from remote {spec.id}: {exc}",
                     file=sys.stderr,
                 )
+                failures += 1
                 continue
             finally:
                 tmp.unlink(missing_ok=True)
@@ -947,6 +981,7 @@ def dry_run_config_sync(cfg, by_profile, force_config) -> None:
                     "this run would fail without --force-config",
                     file=sys.stderr,
                 )
+    return failures
 
 
 def push_manifest(meta_path, by_profile) -> None:
@@ -1189,6 +1224,7 @@ def cmd_config_check(args) -> int:
 def cmd_list(args) -> int:
     matched = False
     config_errors = 0
+    runtime_errors = 0
     for path, cfg, error in _discover(args.subvol):
         if error is not None:
             print(f"config error: {error}", file=sys.stderr)
@@ -1202,8 +1238,8 @@ def cmd_list(args) -> int:
         try:
             meta = manifest.load(meta_path)
         except util.BtrbakError as exc:
-            print(f"config error ({cfg.name}): {exc}", file=sys.stderr)
-            config_errors += 1
+            print(f"error ({cfg.name}): {exc}", file=sys.stderr)
+            runtime_errors += 1
             continue
         if not meta_path.exists():
             print(
@@ -1230,7 +1266,9 @@ def cmd_list(args) -> int:
                 )
     if args.profile and not matched:
         raise config_mod.ConfigError(f"unknown profile: {args.profile!r}")
-    return 2 if config_errors else 0
+    if config_errors:
+        return 2
+    return 1 if runtime_errors else 0
 
 
 def _load_meta_for_verify(cfg):
@@ -1497,8 +1535,9 @@ def cmd_forget(args) -> int:
     - refused when another snapshot lists it as ``parent`` (forgetting it
       would break that chain's restorability);
     - any remote object recorded for the entry (a partial upload, or the
-      object a ``local_deleted`` entry is waiting to have deleted) is removed
-      best-effort, so ``forget`` also finishes a stuck remote delete.
+      object a ``local_deleted`` entry is waiting to have deleted) is removed;
+      if a remote delete fails the entry is kept with ``local_deleted`` set so
+      the delete is retried on the next ``run``.
     """
     auth = config_mod.load_auth()
     path = config_mod.config_path_for_subvol(args.subvol)
@@ -1544,15 +1583,31 @@ def cmd_forget(args) -> int:
                 "forget the entry"
             )
 
+        delete_ok = True
         if snap.get("file"):
             for spec in cfg.profiles[args.profile].remotes:
                 try:
                     create_remote(spec).delete(snap["file"])
+                except RemoteNotFoundError:
+                    pass
                 except Exception as exc:  # noqa: BLE001 - best-effort cleanup
                     print(
                         f"warning: remote delete on {spec.id} failed: {exc}",
                         file=sys.stderr,
                     )
+                    delete_ok = False
+
+        if not delete_ok:
+            # Keep the entry so the remote delete is retried on the next run
+            # (mirrors prune's local_deleted handling) instead of orphaning the
+            # remote object with no record.
+            snap["local_deleted"] = True
+            manifest.save(meta_path, meta)
+            _push_manifest_best_effort(meta_path, collect_remotes(cfg))
+            raise util.BtrbakError(
+                f"{cfg.name}/{args.profile}/{args.snapshot_id}: a remote delete "
+                "failed; kept the entry to retry on the next run"
+            )
 
         manifest.remove_snapshot(meta, args.profile, args.snapshot_id)
         manifest.save(meta_path, meta)

@@ -676,6 +676,9 @@ class _ConfigRemote:
         self.read_error = read_error
         self.writes = []
 
+    def validate(self):
+        return None
+
     def read(self, remote_path, local_dest):
         if self.read_error is not None:
             raise self.read_error
@@ -1323,9 +1326,9 @@ def test_cmd_list_tolerates_upload_entries_without_fields(tmp_path, monkeypatch,
 
 
 def test_cmd_list_reports_non_numeric_created(tmp_path, monkeypatch, capsys):
-    """A corrupt `created` field must surface as a clean config error, not crash."""
+    """A corrupt `created` field must surface as a clean runtime error, not crash."""
     _list_setup(tmp_path, monkeypatch, [{"id": "s1", "created": "nope"}])
-    assert cli.cmd_list(_verify_args()) == 2
+    assert cli.cmd_list(_verify_args()) == 1
     captured = capsys.readouterr()
     assert "'created' must be a int" in captured.err
     assert "s1" not in captured.out
@@ -1696,7 +1699,7 @@ def test_main_reports_malformed_manifest_cleanly(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
 
-    assert cli.main(["list"]) == 2
+    assert cli.main(["list"]) == 1
     assert "non-empty string 'id'" in capsys.readouterr().err
 
 
@@ -2096,9 +2099,12 @@ def test_forget_survives_a_failing_remote_delete(tmp_path, monkeypatch, capsys):
         [_stuck()],
         remotes=[RemoteSpec("r", "dir", {"type": "dir", "path": "/x"})],
     )
-    assert cli.cmd_forget(_forget_args()) == 0
+    with pytest.raises(cli.util.BtrbakError, match="kept the entry"):
+        cli.cmd_forget(_forget_args())
     assert "remote delete on r failed" in capsys.readouterr().err
-    assert _read_meta(cfg)["profiles"]["daily"]["snapshots"] == []
+    snaps = _read_meta(cfg)["profiles"]["daily"]["snapshots"]
+    assert len(snaps) == 1
+    assert snaps[0]["local_deleted"] is True
 
 
 def test_forget_is_wired_into_the_parser():
