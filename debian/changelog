@@ -1,3 +1,9 @@
+btrbak (1.1.2-1) unstable; urgency=medium
+
+  * Document snapshot groups and the apt pre-invoke hook.
+
+ -- Kaiden <11036039+KaidenP@users.noreply.github.com>  Fri, 09 Oct 2026 22:54:45 -0400
+
 btrbak (1.1.1-1) unstable; urgency=medium
 
   * Harden packaging, systemd, and CI.

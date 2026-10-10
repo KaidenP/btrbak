@@ -21,13 +21,13 @@ artifact, then install it with apt so the dependencies are resolved
 automatically:
 
 ```
-sudo apt-get install ./btrbak_1.1.1-1_all.deb
+sudo apt-get install ./btrbak_1.1.2-1_all.deb
 ```
 
 Or, if you already have `python3`, `python3-yaml`, and `btrfs-progs` installed:
 
 ```
-sudo dpkg -i btrbak_1.1.1-1_all.deb
+sudo dpkg -i btrbak_1.1.2-1_all.deb
 ```
 
 The package installs:
@@ -92,7 +92,7 @@ Source lives in the `btrbak` package under `src/`.
 
 ```
 btrbak config check
-btrbak run [SUBVOL] [PROFILE] [--force] [--force-config] [--full] [--dry-run]
+btrbak run [SUBVOL] [PROFILE] [-g NAME | --group NAME] [--force] [--force-config] [--full] [--dry-run]
 btrbak verify [SUBVOL] [PROFILE]
 btrbak list [SUBVOL] [PROFILE]
 btrbak restore SUBVOL PROFILE SNAPSHOT_ID TARGET
@@ -276,7 +276,7 @@ Build a binary `.deb` without needing debhelper or dh-python:
 ./debian/build-deb.sh
 ```
 
-The script produces `dist/btrbak_1.1.0-1_all.deb`. It installs:
+The script produces `dist/btrbak_1.1.2-1_all.deb`. It installs:
 
 - `/usr/bin/btrbak`
 - the `btrbak` package into `/usr/lib/python3/dist-packages/btrbak`
@@ -324,21 +324,28 @@ sudo systemctl enable --now btrbak.timer
 
 ### Snapshot groups
 
-Groups are defined in `/etc/btrbak/groups.yaml`:
+Groups are defined in `/etc/btrbak/groups.yaml`. Each group is a list of
+members, where each member is a `SUBVOL` (the stem of a file in
+`/etc/btrbak/profiles.d`) or a `SUBVOL:PROFILE`:
 
 ```
 apt:
-  - root
-  - var
+  - root          # every profile in profiles.d/root.yaml
+  - var:weekly    # only the `weekly` profile in profiles.d/var.yaml
 boot:
   - root
   - var
   - home
 ```
 
-Each member is a `SUBVOL` (the stem of a file in `/etc/btrbak/profiles.d`) or
-`SUBVOL:PROFILE`. The package installs `apt` and `boot` groups that are empty
-by default, so the event hooks below are no-ops until you add members.
+A bare `SUBVOL` selects every profile in that file; `SUBVOL:PROFILE` selects a
+single profile. Members that share a `SUBVOL` are merged, and a bare `SUBVOL`
+member always means "all profiles" for that file regardless of order. Run a
+group with `btrbak run --group NAME`; `--group` cannot be combined with a
+`SUBVOL` or `PROFILE` argument. An empty group is a no-op.
+
+The package installs `apt` and `boot` groups that are empty by default, so the
+event hooks below are no-ops until you add members.
 
 ### Event-driven snapshots
 
@@ -347,6 +354,20 @@ Two event hooks are installed and enabled by default:
 - `btrbak-snapshot-boot.service` — runs `btrbak run --group boot --force` on boot
 - `/etc/apt/apt.conf.d/80btrbak` — runs `btrbak run --group apt --force` before
   package installs/upgrades
+
+The apt hook is a `DPkg::Pre-Invoke` that runs
+`/usr/lib/btrbak/btrbak-apt-pre`, which in turn runs
+`btrbak run --group apt --force`. It snapshots exactly the profiles named by
+the `apt` group — with the default empty group it snapshots nothing. `--force`
+bypasses the normal `freq` schedule, so the pre-install state is captured even
+when a profile is not due yet.
+
+apt may invoke dpkg several times in one transaction, so the script
+de-duplicates: it writes a marker at `/run/btrbak/apt-pre.stamp` (one-hour TTL)
+after a successful snapshot and skips quietly while a fresh marker exists. A
+single apt transaction therefore yields one snapshot rather than one per dpkg
+invocation, and a genuine snapshot failure exits non-zero to abort the
+transaction.
 
 Check them with:
 
