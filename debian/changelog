@@ -1,3 +1,13 @@
+btrbak (1.2.2-1) unstable; urgency=medium
+
+  * Let the boot-snapshot hook reach remotes: order
+    btrbak-snapshot-boot.service after network-online.target and allow
+    AF_INET/AF_INET6 so a profile in the boot group can upload its
+    gdrive/local remotes on boot instead of failing with "Unable to find
+    the server".
+
+ -- Kaiden <11036039+KaidenP@users.noreply.github.com>  Sat, 10 Oct 2026 19:03:14 -0400
+
 btrbak (1.2.1-1) unstable; urgency=medium
 
   * Fix btrfs filesystem UUID parsing for btrfs-progs >= 6.6, which prints
