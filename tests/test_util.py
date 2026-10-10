@@ -189,6 +189,33 @@ def test_btrfs_fsid_matches_uppercase_uuid(monkeypatch):
         assert util.btrfs_fsid("/mnt/data") == "7574148f-c138-4c09-9203-0352942dfe4f"
 
 
+def test_btrfs_fsid_matches_label_and_uuid_on_one_line(monkeypatch):
+    """btrfs-progs v6.6+ prints the label and uuid on the same line."""
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=(
+            b"Label: 'SSD-raid1'  uuid: b2f63f16-3183-4ec9-8756-619cdcc1debf\n"
+        ),
+    )
+    monkeypatch.setattr(util.subprocess, "run", lambda *a, **k: completed)
+    assert util.btrfs_fsid("/mnt/data") == "b2f63f16-3183-4ec9-8756-619cdcc1debf"
+
+
+def test_btrfs_fsid_ignores_uuid_inside_label(monkeypatch):
+    """A label that itself contains ``uuid:`` must not shadow the real fsid."""
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=(
+            b"Label: 'uuid: not-the-fsid'  "
+            b"uuid: b2f63f16-3183-4ec9-8756-619cdcc1debf\n"
+        ),
+    )
+    monkeypatch.setattr(util.subprocess, "run", lambda *a, **k: completed)
+    assert util.btrfs_fsid("/mnt/data") == "b2f63f16-3183-4ec9-8756-619cdcc1debf"
+
+
 def test_btrfs_fsid_returns_none_without_match(monkeypatch):
     completed = subprocess.CompletedProcess(
         args=[], returncode=0, stdout=b"Label: none\n"

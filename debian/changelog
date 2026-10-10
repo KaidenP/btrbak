@@ -1,3 +1,12 @@
+btrbak (1.2.1-1) unstable; urgency=medium
+
+  * Fix btrfs filesystem UUID parsing for btrfs-progs >= 6.6, which prints
+    the filesystem label and uuid on the same line; same-filesystem
+    validation no longer fails with "dest must be on the same btrfs
+    filesystem as src".
+
+ -- Kaiden <11036039+KaidenP@users.noreply.github.com>  Sat, 10 Oct 2026 13:18:44 -0400
+
 btrbak (1.2.0-1) unstable; urgency=medium
 
   * Make retention count-based: `keep` is now a positive integer (the number

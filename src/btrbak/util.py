@@ -419,12 +419,17 @@ def btrfs_fsid(path) -> str | None:
     if proc.returncode != 0:
         return None
     text = proc.stdout.decode("utf-8", "replace")
-    # btrfs-progs spells this `uuid:` in some versions and `UUID:` in others.
-    # Anchor to the field line so a filesystem label containing `uuid:` is
-    # never mistaken for the filesystem UUID.
-    match = re.search(
-        r"^\s*uuid:\s*([0-9a-fA-F-]+)", text, re.MULTILINE | re.IGNORECASE
+    # btrfs-progs spells this `uuid:` in some versions and `UUID:` in others,
+    # and since v6.6 it prints the filesystem label and uuid on the same line
+    # (`Label: 'name'  uuid: <fsid>`), so an anchor to the start of the line
+    # misses it. A non-empty label is always single-quoted (an empty label is
+    # printed as `none`), so strip the label value first and then match the
+    # `uuid:` field token; this keeps a label that itself contains the text
+    # `uuid:` from being mistaken for the filesystem UUID.
+    text = re.sub(
+        r"Label:\s*(?:'[^']*'|none)\s*", "", text, count=1, flags=re.IGNORECASE
     )
+    match = re.search(r"\buuid:\s*([0-9a-fA-F-]+)", text, re.IGNORECASE)
     return match.group(1).lower() if match else None
 
 
