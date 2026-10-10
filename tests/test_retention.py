@@ -21,7 +21,7 @@ def _meta(snaps):
     return {"profiles": {"p": {"snapshots": snaps}}}
 
 
-def test_prune_chain_leaf_first():
+def test_keep_forever_prunes_nothing():
     meta = _meta(
         [
             _snap("full", 1000),
@@ -29,44 +29,77 @@ def test_prune_chain_leaf_first():
             _snap("incr2", 3000, "incr1"),
         ]
     )
-    assert plan_prune(meta, "p", 10, 5000) == ["incr2", "incr1", "full"]
+    assert plan_prune(meta, "p", -1) == []
 
 
-def test_young_child_protects_parent():
+def test_keep_count_retains_newest_and_their_parents():
+    # keep=2 keeps incr2 + incr1, and their parent full, so nothing is pruned:
+    # the full is the root of a still-live chain.
     meta = _meta(
         [
             _snap("full", 1000),
-            _snap("incr1", 4950, "full"),
+            _snap("incr1", 2000, "full"),
+            _snap("incr2", 3000, "incr1"),
         ]
     )
-    assert plan_prune(meta, "p", 100, 5000) == []
+    assert plan_prune(meta, "p", 2) == []
 
 
-def test_incomplete_not_pruned():
-    meta = _meta([_snap("full", 1000, status="failed")])
-    assert plan_prune(meta, "p", 10, 5000) == []
+def test_prunes_superseded_branch_leaf_first():
+    # full1 -> incr1 is a dead branch once full2 re-roots the chain. keep=3
+    # retains full2 + incr2 + incr3, so only the old branch prunes, leaf-first.
+    meta = _meta(
+        [
+            _snap("full1", 1000),
+            _snap("incr1", 2000, "full1"),
+            _snap("full2", 3000),
+            _snap("incr2", 4000, "full2"),
+            _snap("incr3", 5000, "incr2"),
+        ]
+    )
+    assert plan_prune(meta, "p", 3) == ["incr1", "full1"]
 
 
-def test_local_only_prunes_by_age():
-    meta = _meta([_snap("a", 1000, local=True), _snap("b", 4950, local=True)])
-    assert plan_prune(meta, "p", 100, 5000) == ["a"]
+def test_uncommitted_not_pruned_and_protects_parent():
+    # incr1's upload never finished, so neither it nor its parent full1 may be
+    # pruned, even though full2 is the newest retained snapshot.
+    meta = _meta(
+        [
+            _snap("full1", 1000),
+            _snap("incr1", 2000, "full1", status="failed"),
+            _snap("full2", 3000),
+        ]
+    )
+    assert plan_prune(meta, "p", 1) == []
 
 
-def test_orphan_full_without_children_deleted():
-    meta = _meta([_snap("full", 1000)])
-    assert plan_prune(meta, "p", 10, 5000) == ["full"]
+def test_local_only_snapshot_is_prunable():
+    meta = _meta([_snap("a", 1000, local=True), _snap("b", 2000, local=True)])
+    assert plan_prune(meta, "p", 1) == ["a"]
+
+
+def test_superseded_full_pruned():
+    meta = _meta([_snap("full1", 1000), _snap("full2", 2000)])
+    assert plan_prune(meta, "p", 1) == ["full1"]
 
 
 def test_missing_created_is_not_pruned():
-    """A hand-edited entry without `created` must not be pruned as epoch-old."""
+    """A hand-edited entry without `created` must not be pruned."""
     meta = _meta(
-        [{"id": "full", "type": "full", "uploads": [{"remote": "r", "status": "complete"}]}]
+        [
+            {
+                "id": "s1",
+                "type": "full",
+                "uploads": [{"remote": "r", "status": "complete"}],
+            },
+            _snap("s2", 2000),
+        ]
     )
-    assert plan_prune(meta, "p", 10, 5000) == []
+    assert plan_prune(meta, "p", 1) == []
 
 
 def test_empty_profile_prunes_nothing():
-    assert plan_prune(_meta([]), "p", 10, 5000) == []
+    assert plan_prune(_meta([]), "p", 1) == []
 
 
 def test_interleaved_chains_prune_independently():
@@ -74,11 +107,10 @@ def test_interleaved_chains_prune_independently():
         [
             _snap("a-full", 1000),
             _snap("a-incr", 2000, "a-full"),
-            _snap("b-full", 1000),
-            _snap("b-incr", 2000, "b-full"),
+            _snap("b-full", 1500),
+            _snap("b-incr", 2500, "b-full"),
         ]
     )
-    pruned = plan_prune(meta, "p", 10, 5000)
-    assert set(pruned) == {"a-full", "a-incr", "b-full", "b-incr"}
-    assert pruned.index("a-incr") < pruned.index("a-full")
-    assert pruned.index("b-incr") < pruned.index("b-full")
+    # keep=1 retains the newest snapshot (b-incr) and its parent b-full; the
+    # whole a-chain prunes independently, leaf-first within the chain.
+    assert plan_prune(meta, "p", 1) == ["a-incr", "a-full"]

@@ -32,7 +32,8 @@ The program must be run as **root**. It discovers configuration files in
 format and validation rules are documented in **btrbak-profiles**(5).
 
 The special `-1` timespan means "never" and may be used for `freq.full` and
-`freq.incr` (but not for `keep`).
+`freq.incr`. A profile's `keep` is not a timespan: it is an integer backup
+count, or `-1` to keep everything; see **btrbak-profiles**(5).
 
 # OPTIONS
 

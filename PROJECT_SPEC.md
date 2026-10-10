@@ -10,7 +10,7 @@ incremental offsite backups via `btrfs send`.
 | Topic | Decision |
 |---|---|
 | Backup model | `btrfs send` to files; incremental streams depend on a parent chain |
-| Retention | **Dependency-preserving (Option C)**: each profile declares a full-backup cadence; a snapshot/backup is deleted only when older than `keep` **and** nothing depends on it |
+| Retention | **Dependency-preserving (Option C)**: each profile declares a full-backup cadence and a `keep` count; the `keep` most recent backups are retained together with their parent chains, so nothing a retained backup depends on is ever deleted |
 | Local vs remote | Local `dest` keeps the **snapshot subvolumes**; the `btrfs send` files are transient (staged in `tmpdir`, deleted after upload). Remote stores the send files + manifest. Both sides are pruned under the same `keep` policy. `remotes` is optional — a profile with no remotes manages local snapshots only |
 | Subvolume scope | One `src` subvolume per config file; nested subvolumes are **not** recursed into |
 | Snapshot type | Read-only (`btrfs subvolume snapshot -r`) |
@@ -168,7 +168,7 @@ profiles:                           # required; at least one
     freq:
       full: 7d                      # full-backup cadence (timespan)
       incr: 1d                      # incremental cadence (timespan)
-    keep: 30d                       # retention window (timespan)
+    keep: 30                       # keep 30 backups (plus their parents)
     remotes:                        # optional; omit for a local-only profile
       - name: offsite               # optional; stable id (auto-derived if omitted)
         type: dir
@@ -178,7 +178,7 @@ profiles:                           # required; at least one
     freq:
       full: -1                      # -1 = never due automatically
       incr: -1
-    keep: 90d
+    keep: 90
     remotes:
       - name: offsite
         type: dir
@@ -187,7 +187,7 @@ profiles:                           # required; at least one
     freq:
       full: 1d                      # take a snapshot daily
       incr: -1
-    keep: 14d
+    keep: 14
     # remotes omitted → local-only
 ```
 
@@ -237,7 +237,8 @@ auth:
 `<integer><unit>`, no spaces, e.g. `1d`, `12h`, `2w`, `1mo`.
 
 `freq.full` and `freq.incr` additionally accept `-1`, meaning "never due
-automatically" (manual-only). `keep` must always be a positive timespan.
+automatically" (manual-only). `keep` is not a timespan: it is a positive
+integer backup count, or `-1` to keep everything forever.
 
 | Unit | Meaning |
 |---|---|
@@ -258,7 +259,8 @@ Structural checks run while the config is **loaded**, and are reported as
 - Profile names match `[A-Za-z0-9][A-Za-z0-9._-]*` (see §6.1). The `SUBVOL`
   command-line selector is held to the same rule, because it names a file
   directly inside `profiles.d` and must never be able to say "somewhere else".
-- Timespans parse; `keep` is a positive timespan, never `-1` (§6.3).
+- Timespans parse; `keep` is a positive integer backup count, or `-1` to keep
+  everything forever (§6.3).
 
 Deeper checks run in `validate()`:
 
@@ -272,11 +274,11 @@ Deeper checks run in `validate()`:
 - `tmpdir` exists or is creatable, is a **directory** (not a file), and is
   writable.
 - `profiles` non-empty; `freq.full` and `freq.incr` are each `-1` ("never") or a
-  positive timespan; `keep` is a positive timespan.
-- Warnings (not errors): `dest` nested inside `src`; `keep` < `freq.incr`. The
-  nesting warning is reported once per run (§12) — `config check` prints it from
-  validation, while `run` prints it from its own nesting guard so it can be
-  combined with the 5 s grace period (§13).
+  positive timespan; `keep` is a positive integer, or `-1` to keep forever.
+- Warnings (not errors): `dest` nested inside `src`. The nesting warning is
+  reported once per run (§12) — `config check` prints it from validation,
+  while `run` prints it from its own nesting guard so it can be combined with
+  the 5 s grace period (§13).
 - `remotes` is optional (omit for a local-only profile). When present: each
   remote `type` is registered, `name` (if given) is unique within the profile,
   `auth` keys resolve in `auth.yaml`, and `remote.validate()` passes.
@@ -584,13 +586,19 @@ escape hatch for it, and the retry warning names the exact command.
 
 Run every invocation, even when no new snapshot was created.
 
-A snapshot is deleted **if all** of the following hold:
+`keep` is a count of how many backups to retain (or `-1` to keep everything).
+The `keep` most recent snapshots are retained, together with every snapshot on
+their parent chains, so a retained incremental is always restorable. A
+snapshot is deleted **if all** of the following hold:
 
-1. `now − created ≥ keep` (older than the retention window).
-2. No other snapshot in the profile lists it as `parent` (no dependents).
-3. All of its uploads are `complete`, or it is marked `committed: true`
-   (a local-only snapshot has no uploads, so this is trivially satisfied —
-   local-only snapshots prune by age only).
+1. It is not one of the `keep` most recent snapshots, and it is not an
+   ancestor of a retained snapshot.
+2. All of its uploads are `complete`, or it is marked `committed: true`
+   (a local-only snapshot has no uploads, so this is trivially satisfied).
+   An incomplete snapshot — and its ancestors — is retained until its
+   uploads finish.
+3. It has no dependents: deletion is leaf-first, so a snapshot is removed only
+   after the snapshots that depend on it.
 
 Deletion cascades leaf-first: repeat the scan until a pass deletes nothing
 (because deleting a leaf may make its parent deletable). For each deleted
@@ -611,8 +619,9 @@ send files already landed.
 If a remote `delete` fails after the local subvolume was removed, the entry is
 kept in `meta.yaml` and marked `local_deleted: true` (see §8) so the remote
 delete is retried on the next run without the snapshot ever being reused as a
-`send` parent. (It stays eligible on every subsequent run, because the
-retention test is `now - created >= keep` and that never goes back to false.)
+`send` parent. (It stays eligible on every subsequent run: a committed
+`local_deleted` entry outside the retained window is pruned by the same
+count-based pass, so the remote delete keeps being retried.)
 
 If the local `btrfs subvolume delete` itself fails, pruning aborts with both
 the local subvolume and the manifest entry intact. The abort propagates out of
@@ -1008,7 +1017,8 @@ btrbak gdrive authorize --client-secret PATH [--token PATH] [--console]
   never uploaded. Inline remote credentials written directly in a profile file
   would be uploaded as part of `config.yaml`; route all secrets through
   `auth.yaml` instead.
-- `keep` is measured against snapshot **creation** time.
+- `keep` counts the **most recent** snapshots (by creation time) plus their
+  parent chains.
 
 ---
 

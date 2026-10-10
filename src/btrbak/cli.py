@@ -501,7 +501,7 @@ def run_config(
         )
 
         for pname, profile in selected.profiles.items():
-            for sid in retention.plan_prune(meta, pname, profile.keep, now_ts):
+            for sid in retention.plan_prune(meta, pname, profile.keep):
                 print(f"[dry-run] {selected.name}/{pname}: would prune snapshot {sid}")
         return sync_failures or 0
 
@@ -830,10 +830,9 @@ def prune(cfg, meta, by_profile, meta_path=None) -> None:
     delete and the following save can still leave a stale reference, which
     self-heals on the next run.
     """
-    now_ts = util.now()
     for pname, profile in cfg.profiles.items():
         by_id = manifest.snapshots_by_id(meta, pname)
-        for sid in retention.plan_prune(meta, pname, profile.keep, now_ts):
+        for sid in retention.plan_prune(meta, pname, profile.keep):
             snap = by_id.get(sid)
             snap_path = cfg.dest / pname / sid
             if snap_path.exists():

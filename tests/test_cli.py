@@ -62,13 +62,13 @@ def _local(sid, created):
 
 
 def test_first_run_creates_full():
-    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("daily", 7 * 86400, 86400, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     due, stype, parent = cli.compute_plan(profile, {"profiles": {"daily": {"snapshots": []}}}, 5000)
     assert (due, stype, parent) == (True, "full", None)
 
 
 def test_first_run_creates_full_when_full_never_but_incr_auto():
-    profile = _profile("daily", -1, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("daily", -1, 86400, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     due, stype, parent = cli.compute_plan(profile, {"profiles": {"daily": {"snapshots": []}}}, 5000)
     assert (due, stype, parent) == (True, "full", None)
 
@@ -80,7 +80,7 @@ def test_local_only_snapshot_is_never_a_send_parent():
     produces an `incr` whose parent has no send file, so the chain can never
     be restored offsite.
     """
-    profile = _profile("daily", -1, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("daily", -1, 86400, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     meta = {"profiles": {"daily": {"snapshots": [_local("l1", 4990)]}}}
     due, stype, parent = cli.compute_plan(profile, meta, 5000, force=True)
     assert (due, stype, parent) == (True, "full", None)
@@ -88,14 +88,14 @@ def test_local_only_snapshot_is_never_a_send_parent():
 
 def test_full_is_due_when_only_local_snapshots_exist_even_if_recent():
     """Local entries must not satisfy the incremental cadence either."""
-    profile = _profile("daily", -1, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("daily", -1, 86400, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     meta = {"profiles": {"daily": {"snapshots": [_local("l1", 4999)]}}}
     due, stype, parent = cli.compute_plan(profile, meta, 5000)
     assert (due, stype, parent) == (True, "full", None)
 
 
 def test_incremental_still_parents_onto_the_latest_remote_snapshot():
-    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("daily", 7 * 86400, 86400, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     meta = {"profiles": {"daily": {"snapshots": [_remote("f1", 0), _remote("i1", 1000, "f1")]}}}
     due, stype, parent = cli.compute_plan(profile, meta, 1500, force=True)
     assert (due, stype, parent) == (True, "incr", "i1")
@@ -103,7 +103,7 @@ def test_incremental_still_parents_onto_the_latest_remote_snapshot():
 
 def test_snapshot_with_no_remote_copy_is_never_a_send_parent():
     """An entry whose remotes were all removed is committed but has no file."""
-    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("daily", 7 * 86400, 86400, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     orphan = {
         "id": "o1",
         "created": 1000,
@@ -119,7 +119,7 @@ def test_snapshot_with_no_remote_copy_is_never_a_send_parent():
 
 
 def test_local_deleted_snapshot_is_never_a_send_parent():
-    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("daily", 7 * 86400, 86400, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     gone = dict(_remote("f1", 0), local_deleted=True)
     meta = {"profiles": {"daily": {"snapshots": [gone]}}}
     due, stype, parent = cli.compute_plan(profile, meta, 1500, force=True)
@@ -127,47 +127,47 @@ def test_local_deleted_snapshot_is_never_a_send_parent():
 
 
 def test_manual_remote_profile_not_due_on_first_run():
-    profile = _profile("manual", -1, -1, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("manual", -1, -1, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     assert cli.compute_plan(profile, {"profiles": {"manual": {"snapshots": []}}}, 5000) == (False, None, None)
 
 
 def test_full_due_after_window():
-    profile = _profile("daily", 100, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("daily", 100, 86400, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     meta = {"profiles": {"daily": {"snapshots": [_remote("f", 1000)]}}}
     due, stype, parent = cli.compute_plan(profile, meta, 5000)
     assert (due, stype, parent) == (True, "full", None)
 
 
 def test_incremental_due():
-    profile = _profile("daily", 7 * 86400, 100, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("daily", 7 * 86400, 100, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     meta = {"profiles": {"daily": {"snapshots": [_remote("f", 4000)]}}}
     due, stype, parent = cli.compute_plan(profile, meta, 5000)
     assert (due, stype, parent) == (True, "incr", "f")
 
 
 def test_nothing_due():
-    profile = _profile("daily", 7 * 86400, 100, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("daily", 7 * 86400, 100, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     meta = {"profiles": {"daily": {"snapshots": [_remote("f", 4990)]}}}
     due, stype, parent = cli.compute_plan(profile, meta, 5000)
     assert (due, stype, parent) == (False, None, None)
 
 
 def test_force_creates_incremental_when_not_due():
-    profile = _profile("daily", 7 * 86400, 100, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("daily", 7 * 86400, 100, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     meta = {"profiles": {"daily": {"snapshots": [_remote("f", 4990)]}}}
     due, stype, parent = cli.compute_plan(profile, meta, 5000, force=True)
     assert (due, stype, parent) == (True, "incr", "f")
 
 
 def test_full_flag_forces_full():
-    profile = _profile("daily", 7 * 86400, 100, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})])
+    profile = _profile("daily", 7 * 86400, 100, 30, [RemoteSpec("r", "dir", {"path": "/x"})])
     meta = {"profiles": {"daily": {"snapshots": [_remote("f", 4990)]}}}
     due, stype, parent = cli.compute_plan(profile, meta, 5000, full=True)
     assert (due, stype, parent) == (True, "full", None)
 
 
 def test_local_only_due_and_type():
-    profile = _profile("local", 86400, -1, 14 * 86400)
+    profile = _profile("local", 86400, -1, 14)
     assert cli.compute_plan(
         profile, {"profiles": {"local": {"snapshots": []}}}, 5000) == (
         True,
@@ -214,7 +214,7 @@ def test_run_profile_records_codec_per_snapshot(tmp_path, monkeypatch):
         "daily",
         7 * 86400,
         86400,
-        30 * 86400,
+        30,
         [RemoteSpec("r", "dir", {"path": str(tmp_path / "remote")})],
     )
     cfg = _cfg({"daily": profile})
@@ -284,7 +284,7 @@ def test_reconcile_uploads_noop_when_current():
 
 
 def test_local_only_manual_profile_not_due_on_first_run():
-    profile = _profile("manual", -1, -1, 30 * 86400)
+    profile = _profile("manual", -1, -1, 30)
     assert cli.compute_plan(
         profile, {"profiles": {"manual": {"snapshots": []}}}, 5000
     ) == (False, None, None)
@@ -293,8 +293,8 @@ def test_local_only_manual_profile_not_due_on_first_run():
 def test_collect_remotes_distinguishes_same_name_different_settings():
     cfg = _cfg(
         {
-            "a": _profile("a", 86400, -1, 30 * 86400, [RemoteSpec("offsite", "dir", {"path": "/remoteA"})]),
-            "b": _profile("b", 86400, -1, 30 * 86400, [RemoteSpec("offsite", "dir", {"path": "/remoteB"})]),
+            "a": _profile("a", 86400, -1, 30, [RemoteSpec("offsite", "dir", {"path": "/remoteA"})]),
+            "b": _profile("b", 86400, -1, 30, [RemoteSpec("offsite", "dir", {"path": "/remoteB"})]),
         }
     )
     by_profile = cli.collect_remotes(cfg)
@@ -305,8 +305,8 @@ def test_collect_remotes_distinguishes_same_name_different_settings():
 def test_unique_remotes_deduplicates_identical_endpoints():
     cfg = _cfg(
         {
-            "a": _profile("a", 86400, -1, 30 * 86400, [RemoteSpec("offsite", "dir", {"path": "/remote"})]),
-            "b": _profile("b", 86400, -1, 30 * 86400, [RemoteSpec("offsite", "dir", {"path": "/remote"})]),
+            "a": _profile("a", 86400, -1, 30, [RemoteSpec("offsite", "dir", {"path": "/remote"})]),
+            "b": _profile("b", 86400, -1, 30, [RemoteSpec("offsite", "dir", {"path": "/remote"})]),
         }
     )
     unique = cli.unique_remotes(cli.collect_remotes(cfg))
@@ -326,7 +326,7 @@ class _FakeRemote:
 
 
 def test_retry_upload_reuses_complete_copy(tmp_path, monkeypatch):
-    cfg = _cfg({"p": _profile("p", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"p": _profile("p", 86400, -1, 30)})
     cfg.dest = tmp_path / "snapshots"
     cfg.tmpdir = tmp_path / "tmp"
 
@@ -362,7 +362,7 @@ def test_retry_upload_reuses_complete_copy(tmp_path, monkeypatch):
 
 
 def test_retry_upload_resends_when_no_complete_copy(tmp_path, monkeypatch):
-    cfg = _cfg({"p": _profile("p", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"p": _profile("p", 86400, -1, 30)})
     cfg.dest = tmp_path / "snapshots"
     cfg.tmpdir = tmp_path / "tmp"
     (cfg.dest / "p" / "s1").mkdir(parents=True)
@@ -402,7 +402,7 @@ def test_retry_upload_resends_when_no_complete_copy(tmp_path, monkeypatch):
 
 
 def test_full_flag_ignored_for_local_only():
-    profile = _profile("local", 86400, -1, 14 * 86400)
+    profile = _profile("local", 86400, -1, 14)
     meta = {"profiles": {"local": {"snapshots": [_local("a", 4990)]}}}
     assert cli.compute_plan(profile, meta, 5000, full=True) == (False, None, None)
     assert cli.compute_plan(profile, meta, 5000, force=True) == (True, "local", None)
@@ -466,8 +466,8 @@ def test_reconcile_uploads_does_not_backfill_local_deleted():
 
 
 def test_cmd_run_continues_after_config_error(monkeypatch, capsys):
-    cfg_bad = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
-    cfg_good = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg_bad = _cfg({"daily": _profile("daily", 86400, -1, 30)})
+    cfg_good = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     monkeypatch.setattr(
         cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg_bad.path, cfg_bad, None), (cfg_good.path, cfg_good, None)]
     )
@@ -512,7 +512,15 @@ def test_prune_marks_local_deleted_when_remote_delete_fails(tmp_path, monkeypatc
                         "parent": None,
                         "file": "daily/s1.send",
                         "uploads": [{"remote": "r", "status": "complete"}],
-                    }
+                    },
+                    {
+                        "id": "s2",
+                        "created": 2000,
+                        "type": "full",
+                        "parent": None,
+                        "file": "daily/s2.send",
+                        "uploads": [{"remote": "r", "status": "complete"}],
+                    },
                 ]
             }
         }
@@ -520,6 +528,7 @@ def test_prune_marks_local_deleted_when_remote_delete_fails(tmp_path, monkeypatc
 
     monkeypatch.setattr(cli.util, "now", lambda: 5000)
     (cfg.dest / "daily" / "s1").mkdir(parents=True)
+    (cfg.dest / "daily" / "s2").mkdir(parents=True)
     deleted = []
     monkeypatch.setattr(cli.snapshot, "delete_snapshot", lambda path: deleted.append(path))
 
@@ -533,9 +542,12 @@ def test_prune_marks_local_deleted_when_remote_delete_fails(tmp_path, monkeypatc
 
     cli.prune(cfg, meta, by_profile)
 
-    assert len(deleted) == 1
-    assert meta["profiles"]["daily"]["snapshots"][0]["local_deleted"] is True
-    assert manifest.last_committed(meta, "daily") is None
+    assert deleted == [cfg.dest / "daily" / "s1"]
+    snaps = manifest.snapshots(meta, "daily")
+    s1 = next(s for s in snaps if s["id"] == "s1")
+    assert s1["local_deleted"] is True
+    last = manifest.last_committed(meta, "daily")
+    assert last is not None and last["id"] == "s2"
 
 
 def test_prune_persists_progress_when_local_delete_fails(tmp_path, monkeypatch):
@@ -567,12 +579,21 @@ def test_prune_persists_progress_when_local_delete_fails(tmp_path, monkeypatch):
                         "file": "daily/s2.send",
                         "uploads": [{"remote": "r", "status": "complete"}],
                     },
+                    {
+                        "id": "s3",
+                        "created": 3000,
+                        "type": "full",
+                        "parent": None,
+                        "file": "daily/s3.send",
+                        "uploads": [{"remote": "r", "status": "complete"}],
+                    },
                 ]
             }
         }
     }
     (cfg.dest / "daily" / "s1").mkdir(parents=True)
     (cfg.dest / "daily" / "s2").mkdir(parents=True)
+    (cfg.dest / "daily" / "s3").mkdir(parents=True)
     manifest.save(meta_path, meta)
 
     calls = []
@@ -599,12 +620,12 @@ def test_prune_persists_progress_when_local_delete_fails(tmp_path, monkeypatch):
     # The first (leaf) deletion must already be persisted even though the
     # second local delete aborted the prune.
     on_disk = manifest.load(meta_path)
-    assert [s["id"] for s in manifest.snapshots(on_disk, "daily")] == ["s1"]
+    assert [s["id"] for s in manifest.snapshots(on_disk, "daily")] == ["s1", "s3"]
 
 
 def test_cmd_list_skips_configs_without_profile(monkeypatch, capsys):
-    cfg_a = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
-    cfg_b = _cfg({"weekly": _profile("weekly", 86400, -1, 30 * 86400)})
+    cfg_a = _cfg({"daily": _profile("daily", 86400, -1, 30)})
+    cfg_b = _cfg({"weekly": _profile("weekly", 86400, -1, 30)})
     monkeypatch.setattr(
         cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg_a.path, cfg_a, None), (cfg_b.path, cfg_b, None)]
     )
@@ -619,7 +640,7 @@ def test_cmd_list_skips_configs_without_profile(monkeypatch, capsys):
 
 
 def test_cmd_list_unknown_profile_raises(monkeypatch):
-    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     monkeypatch.setattr(
         cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)]
     )
@@ -693,7 +714,7 @@ class _ConfigRemote:
 
 def _sync_cfg(tmp_path, remote):
     profile = _profile(
-        "daily", 7 * 86400, 86400, 30 * 86400, [RemoteSpec("r", "dir", {"path": "/x"})]
+        "daily", 7 * 86400, 86400, 30, [RemoteSpec("r", "dir", {"path": "/x"})]
     )
     cfg = _cfg({"daily": profile})
     cfg.src = tmp_path / "src"
@@ -873,7 +894,7 @@ def _verify_setup(tmp_path, monkeypatch, snapshots, remote=None, name="root"):
     """Build a config with a manifest, patching remote instantiation."""
     remote = remote if remote is not None else _VerifyRemote()
     spec = _remote_spec(tmp_path)
-    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [spec])
+    profile = _profile("daily", 7 * 86400, 86400, 30, [spec])
     cfg = _cfg({"daily": profile})
     cfg.name = name
     cfg.src = tmp_path / "src"
@@ -1133,7 +1154,7 @@ def test_load_meta_for_verify_downloads_from_the_first_remote_that_has_one(
     specs = [RemoteSpec("a", "dir", {"type": "dir", "path": "/a"}),
              RemoteSpec("b", "dir", {"type": "dir", "path": "/b"})]
     monkeypatch.setattr(cli, "create_remote", lambda spec: remotes.pop(0))
-    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400, specs)})
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30, specs)})
     cfg.name = "root"
     cfg.dest = tmp_path / "dest"
     cfg.tmpdir = tmp_path / "tmp"
@@ -1149,7 +1170,7 @@ def test_load_meta_for_verify_downloads_from_the_first_remote_that_has_one(
 
 def test_load_meta_for_verify_prefers_the_local_manifest(tmp_path, monkeypatch):
     local = {"version": 1, "profiles": {"daily": {"snapshots": []}}}
-    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     cfg.name = "root"
     cfg.dest = tmp_path / "dest"
     cfg.tmpdir = tmp_path / "tmp"
@@ -1173,7 +1194,7 @@ def test_load_meta_for_verify_reports_nothing_available(tmp_path, monkeypatch):
             raise cli.RemoteNotFoundError("nope")
 
     monkeypatch.setattr(cli, "create_remote", lambda spec: _Unavailable())
-    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400,
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30,
                                  [RemoteSpec("a", "dir", {"type": "dir", "path": "/a"})])})
     cfg.name = "root"
     cfg.dest = tmp_path / "dest"
@@ -1218,7 +1239,7 @@ def test_verify_continues_past_bad_remote_config(tmp_path, monkeypatch, capsys):
     """One broken config must not hide the result of every other config."""
     good, _ = _verify_setup(tmp_path, monkeypatch, [_sent()], name="good")
     bad_spec = RemoteSpec("r", "s3", {"type": "s3"})
-    bad = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400, [bad_spec])})
+    bad = _cfg({"daily": _profile("daily", 86400, -1, 30, [bad_spec])})
     bad.name = "bad"
     bad.dest = tmp_path / "dest"
     bad.tmpdir = tmp_path / "tmp"
@@ -1249,14 +1270,14 @@ def test_verify_surfaces_per_config_error(tmp_path, monkeypatch, capsys):
 
 
 def test_verify_unknown_profile_raises(tmp_path, monkeypatch):
-    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
     with pytest.raises(cli.config_mod.ConfigError, match="unknown profile"):
         cli.cmd_verify(_verify_args(profile="nope"))
 
 
 def test_verify_skips_configs_without_profile(tmp_path, monkeypatch):
-    cfg = _cfg({"weekly": _profile("weekly", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"weekly": _profile("weekly", 86400, -1, 30)})
     monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
     with pytest.raises(cli.config_mod.ConfigError, match="unknown profile"):
         cli.cmd_verify(_verify_args(profile="daily"))
@@ -1266,7 +1287,7 @@ def test_verify_skips_configs_without_profile(tmp_path, monkeypatch):
 
 
 def _list_setup(tmp_path, monkeypatch, snapshots=None, write_manifest=True):
-    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     cfg.dest = tmp_path / "dest"
     cfg.dest.mkdir()
     if write_manifest:
@@ -1391,7 +1412,7 @@ def test_cmd_list_handles_a_reversed_deep_chain(tmp_path, monkeypatch, capsys):
 
 
 def test_cmd_config_check_reports_errors(monkeypatch, capsys):
-    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
     monkeypatch.setattr(cli.config_mod, "validate", lambda cfg: (["boom"], ["careful"]))
     assert cli.cmd_config_check(SimpleNamespace()) == 2
@@ -1402,7 +1423,7 @@ def test_cmd_config_check_reports_errors(monkeypatch, capsys):
 
 
 def test_cmd_config_check_ok(monkeypatch, capsys):
-    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
     monkeypatch.setattr(cli.config_mod, "validate", lambda cfg: ([], []))
     assert cli.cmd_config_check(SimpleNamespace()) == 0
@@ -1414,7 +1435,7 @@ def test_cmd_config_check_ok(monkeypatch, capsys):
 
 
 def test_cmd_config_check_omits_ok_when_warnings_are_present(monkeypatch, capsys):
-    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     monkeypatch.setattr(cli.config_mod, "discover_configs_tolerant", lambda subvol=None: [(cfg.path, cfg, None)])
     monkeypatch.setattr(cli.config_mod, "validate", lambda cfg: ([], ["careful"]))
     assert cli.cmd_config_check(SimpleNamespace()) == 0
@@ -1425,7 +1446,7 @@ def test_cmd_config_check_omits_ok_when_warnings_are_present(monkeypatch, capsys
 
 def test_cmd_config_check_reports_an_unloadable_config_and_keeps_going(tmp_path, monkeypatch, capsys):
     """The whole point of `config check` is to report every problem at once."""
-    good = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    good = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     _stub_one_broken_config(monkeypatch, good, tmp_path)
     monkeypatch.setattr(cli.config_mod, "validate", lambda cfg: (["boom"], []))
     assert cli.cmd_config_check(SimpleNamespace()) == 2
@@ -1450,7 +1471,7 @@ def _stub_one_broken_config(monkeypatch, good, tmp_path):
 
 def test_run_reports_an_unloadable_config_and_still_runs_the_rest(tmp_path, monkeypatch, capsys):
     """One bad profile must not stop a timer-driven run for every other subvol."""
-    good = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    good = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     _stub_one_broken_config(monkeypatch, good, tmp_path)
     seen = []
     monkeypatch.setattr(cli, "run_config", lambda cfg, *a, **k: seen.append(cfg.name) or 0)
@@ -1479,8 +1500,8 @@ def test_run_group_rejects_positional_selectors():
 
 
 def test_discover_group_bare_member_selects_all_profiles(monkeypatch):
-    daily = _profile("daily", 86400, -1, 30 * 86400)
-    weekly = _profile("weekly", 7 * 86400, -1, 30 * 86400)
+    daily = _profile("daily", 86400, -1, 30)
+    weekly = _profile("weekly", 7 * 86400, -1, 30)
     cfg = _cfg({"daily": daily, "weekly": weekly})
     monkeypatch.setattr(cli.config_mod, "load_groups", lambda: {
         "apt": [("root", None), ("root", "weekly")],
@@ -1502,7 +1523,7 @@ def test_discover_group_bare_member_selects_all_profiles(monkeypatch):
 
 
 def test_list_reports_an_unloadable_config_and_still_lists_the_rest(tmp_path, monkeypatch, capsys):
-    good = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    good = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     good.dest = tmp_path / "dest"
     _stub_one_broken_config(monkeypatch, good, tmp_path)
     assert cli.cmd_list(SimpleNamespace(subvol=None, profile=None)) == 2
@@ -1512,7 +1533,7 @@ def test_list_reports_an_unloadable_config_and_still_lists_the_rest(tmp_path, mo
 
 
 def test_verify_reports_an_unloadable_config_and_still_verifies_the_rest(tmp_path, monkeypatch, capsys):
-    good = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    good = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     good.tmpdir = tmp_path / "tmp"
     good.dest = tmp_path / "dest"
     _stub_one_broken_config(monkeypatch, good, tmp_path)
@@ -1536,7 +1557,7 @@ def test_cmd_config_check_discovery_error(monkeypatch, capsys):
 
 
 def test_cmd_restore_delegates_and_locks(tmp_path, monkeypatch):
-    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     cfg.tmpdir = tmp_path / "tmp"
     cfg.dest = tmp_path / "dest"
     cfg.dest.mkdir()
@@ -1558,7 +1579,7 @@ def test_cmd_restore_delegates_and_locks(tmp_path, monkeypatch):
 
 
 def test_cmd_restore_rejects_bad_remote_config(tmp_path, monkeypatch):
-    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     monkeypatch.setattr(cli.config_mod, "load_auth", lambda: {})
     monkeypatch.setattr(
         cli.config_mod, "config_path_for_subvol", lambda subvol: Path("/x/root.yaml")
@@ -1690,7 +1711,7 @@ def test_main_handles_ctrl_c_without_a_traceback(monkeypatch, capsys):
 
 def test_main_reports_malformed_manifest_cleanly(monkeypatch, tmp_path, capsys):
     """A hand-edited meta.yaml must surface as a clean error, not a traceback."""
-    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30 * 86400)})
+    cfg = _cfg({"daily": _profile("daily", 86400, -1, 30)})
     cfg.dest = tmp_path / "dest"
     cfg.dest.mkdir()
     (cfg.dest / "meta.yaml").write_text(
@@ -1766,7 +1787,7 @@ def test_verify_does_not_report_a_filtered_out_profile_as_orphaned(
 ):
     """`verify PROFILE` narrows the selection; the rest are not orphans."""
     cfg, _remote = _verify_setup(tmp_path, monkeypatch, [_sent()])
-    weekly = _profile("weekly", 7 * 86400, 86400, 30 * 86400, [_remote_spec(tmp_path)])
+    weekly = _profile("weekly", 7 * 86400, 86400, 30, [_remote_spec(tmp_path)])
     full = cli.config_mod.replace(cfg, profiles={**cfg.profiles, "weekly": weekly})
     selected = cli.config_mod.select_profiles(full, "daily")
     meta = manifest.load(full.dest / "meta.yaml")
@@ -1861,7 +1882,7 @@ def test_dry_run_reports_only_the_missing_remote_on_a_retry(tmp_path, monkeypatc
     kept = _remote_spec(tmp_path, rid="offsite")
     added = _remote_spec(tmp_path, rid="new-remote")
     cfg = _orphan_setup(tmp_path, monkeypatch, extra_snapshots=0)
-    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [kept, added])
+    profile = _profile("daily", 7 * 86400, 86400, 30, [kept, added])
     cfg = cli.config_mod.replace(cfg, profiles={"daily": profile})
     manifest.save(
         cfg.dest / "meta.yaml",
@@ -1897,7 +1918,7 @@ def test_dry_run_re_sends_when_the_only_complete_copy_left_the_profile(
     """A copy on a removed remote cannot be reused, so the snapshot re-sends."""
     added = _remote_spec(tmp_path, rid="new-remote")
     cfg = _orphan_setup(tmp_path, monkeypatch, extra_snapshots=0)
-    profile = _profile("daily", 7 * 86400, 86400, 30 * 86400, [added])
+    profile = _profile("daily", 7 * 86400, 86400, 30, [added])
     cfg = cli.config_mod.replace(cfg, profiles={"daily": profile})
     manifest.save(
         cfg.dest / "meta.yaml",
@@ -1978,7 +1999,7 @@ def _stuck(snap_id="s1", **extra):
 
 def _forget_setup(tmp_path, monkeypatch, snapshots, remotes=None):
     cfg = _cfg(
-        {"daily": _profile("daily", 86400, -1, 30 * 86400, remotes or [])}
+        {"daily": _profile("daily", 86400, -1, 30, remotes or [])}
     )
     cfg.dest = tmp_path / "dest"
     cfg.tmpdir = tmp_path / "tmp"

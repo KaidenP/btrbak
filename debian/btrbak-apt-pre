@@ -1,5 +1,5 @@
 #!/bin/sh
-# btrbak-apt-pre — snapshot the `apt` group before an apt/dpkg transaction.
+# btrbak-apt-pre — full-snapshot the `apt` group before an apt/dpkg transaction.
 #
 # apt may invoke dpkg several times in a single transaction; the marker file
 # keeps that from producing one snapshot per dpkg invocation.
@@ -36,7 +36,7 @@ fi
 
 # Run the snapshot first and touch the marker only on success, so a failed
 # snapshot does not suppress a retry for the rest of the TTL window.
-if ! /usr/bin/btrbak run --group apt --force; then
+if ! /usr/bin/btrbak run --group apt --force --full; then
     exit 1
 fi
 

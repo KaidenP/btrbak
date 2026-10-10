@@ -59,8 +59,10 @@ Each profile is a mapping with the following keys.
   used here.
 
 `keep`
-: Required. A timespan for which snapshots are retained before pruning. Must
-  not be `-1`.
+: Required. A positive integer: the number of backups to retain. The `keep`
+  most recent snapshots are kept together with every snapshot on their parent
+  chains, so a retained incremental is always restorable. `-1` keeps
+  everything forever.
 
 `remotes`
 : Optional list of remote mappings; defaults to an empty list (local snapshots
@@ -110,7 +112,8 @@ resumable and replace the previous object only once complete.
 Timespans are strings such as `1d`, `12h`, `2w`, `1mo`, or `1y`. Supported
 units are `s`, `min`, `h`, `d`, `w`, `mo`, and `y`. A bare positive integer is
 accepted as a number of seconds. The sentinel `-1` means "never" and is
-accepted only for `freq.full` and `freq.incr`.
+accepted only for `freq.full` and `freq.incr` (the profile `keep` key is not a
+timespan; it is an integer backup count, or `-1` to keep forever).
 
 # NAME RULES
 
@@ -137,7 +140,7 @@ profiles:
     freq:
       full: 1w
       incr: 1h
-    keep: 1mo
+    keep: 30
     remotes:
       - type: dir
         name: offsite

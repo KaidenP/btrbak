@@ -20,7 +20,7 @@ def test_load_basic(tmp_path):
             "profiles": {
                 "daily": {
                     "freq": {"full": "7d", "incr": "1d"},
-                    "keep": "30d",
+                    "keep": 30,
                     "remotes": [{"type": "dir", "path": "/mnt/offsite"}],
                 }
             },
@@ -29,7 +29,7 @@ def test_load_basic(tmp_path):
     cfg = config.load_config(cfg_file, {})
     assert cfg.name == "root"
     assert str(cfg.src) == "/mnt/data"
-    assert cfg.profiles["daily"].keep == 30 * 86400
+    assert cfg.profiles["daily"].keep == 30
     assert cfg.profiles["daily"].freq_full == 7 * 86400
     assert cfg.profiles["daily"].freq_incr == 86400
     assert cfg.profiles["daily"].remotes[0].type == "dir"
@@ -45,7 +45,7 @@ def test_auth_is_replaced(tmp_path):
             "profiles": {
                 "daily": {
                     "freq": {"full": "7d", "incr": "1d"},
-                    "keep": "30d",
+                    "keep": 30,
                     "remotes": [{"type": "dir", "path": "/mnt/offsite", "auth": "offsite"}],
                 }
             },
@@ -66,7 +66,7 @@ def test_auth_missing_key(tmp_path):
             "profiles": {
                 "daily": {
                     "freq": {"full": "7d", "incr": "1d"},
-                    "keep": "30d",
+                    "keep": 30,
                     "remotes": [{"type": "dir", "path": "/x", "auth": "nope"}],
                 }
             },
@@ -86,7 +86,7 @@ def test_remote_stable_id(tmp_path):
             "profiles": {
                 "daily": {
                     "freq": {"full": "7d", "incr": "1d"},
-                    "keep": "30d",
+                    "keep": 30,
                     "remotes": [
                         {"type": "dir", "path": "/a"},
                         {"type": "dir", "path": "/b"},
@@ -113,7 +113,7 @@ def test_duplicate_remote_rejected(tmp_path):
             "profiles": {
                 "daily": {
                     "freq": {"full": "7d", "incr": "1d"},
-                    "keep": "30d",
+                    "keep": 30,
                     "remotes": [
                         {"type": "dir", "path": "/a"},
                         {"type": "dir", "path": "/a"},
@@ -126,7 +126,7 @@ def test_duplicate_remote_rejected(tmp_path):
         config.load_config(cfg_file, {})
 
 
-def test_freq_never_and_keep_forbidden(tmp_path):
+def test_freq_never_accepted(tmp_path):
     cfg_file = tmp_path / "root.yaml"
     _write(
         cfg_file,
@@ -134,7 +134,7 @@ def test_freq_never_and_keep_forbidden(tmp_path):
             "src": "/mnt/data",
             "dest": "/mnt/data/.snapshots",
             "profiles": {
-                "apt": {"freq": {"full": -1, "incr": -1}, "keep": "90d"}
+                "apt": {"freq": {"full": -1, "incr": -1}, "keep": 90}
             },
         },
     )
@@ -143,7 +143,7 @@ def test_freq_never_and_keep_forbidden(tmp_path):
     assert timespan.is_never(cfg.profiles["apt"].freq_incr)
 
 
-def test_keep_never_rejected(tmp_path):
+def test_keep_forever_accepted(tmp_path):
     cfg_file = tmp_path / "root.yaml"
     _write(
         cfg_file,
@@ -153,13 +153,27 @@ def test_keep_never_rejected(tmp_path):
             "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": -1}},
         },
     )
-    with pytest.raises(config.ConfigError):
+    assert config.load_config(cfg_file, {}).profiles["daily"].keep == -1
+
+
+@pytest.mark.parametrize("keep", [0, -2, "30d", True, None, 1.5])
+def test_keep_invalid_rejected(tmp_path, keep):
+    cfg_file = tmp_path / "root.yaml"
+    _write(
+        cfg_file,
+        {
+            "src": "/mnt/data",
+            "dest": "/mnt/data/.snapshots",
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": keep}},
+        },
+    )
+    with pytest.raises(config.ConfigError, match="'keep'"):
         config.load_config(cfg_file, {})
 
 
 def test_missing_src_or_dest(tmp_path):
     cfg_file = tmp_path / "root.yaml"
-    _write(cfg_file, {"profiles": {"daily": {"freq": {"full": "1d", "incr": "1d"}, "keep": "7d"}}})
+    _write(cfg_file, {"profiles": {"daily": {"freq": {"full": "1d", "incr": "1d"}, "keep": 7}}})
     with pytest.raises(config.ConfigError):
         config.load_config(cfg_file, {})
 
@@ -180,7 +194,7 @@ def test_compression_invalid_level_rejected(tmp_path, level):
             "src": "/mnt/data",
             "dest": "/mnt/data/.snapshots",
             "compression": {"algorithm": "xz", "level": level},
-            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
         },
     )
     with pytest.raises(config.ConfigError):
@@ -196,7 +210,7 @@ def test_compression_valid_level_accepted(tmp_path, level):
             "src": "/mnt/data",
             "dest": "/mnt/data/.snapshots",
             "compression": {"algorithm": "xz", "level": level},
-            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
         },
     )
     cfg = config.load_config(cfg_file, {})
@@ -211,8 +225,8 @@ def test_filter_profiles(tmp_path):
             "src": "/mnt/data",
             "dest": "/mnt/data/.snapshots",
             "profiles": {
-                "daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"},
-                "weekly": {"freq": {"full": "30d", "incr": "7d"}, "keep": "90d"},
+                "daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30},
+                "weekly": {"freq": {"full": "30d", "incr": "7d"}, "keep": 90},
             },
         },
     )
@@ -229,7 +243,7 @@ def test_tmpdir_null_uses_default(tmp_path):
             "src": "/mnt/data",
             "dest": "/mnt/data/.snapshots",
             "tmpdir": None,
-            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
         },
     )
     cfg = config.load_config(cfg_file, {})
@@ -243,7 +257,7 @@ def test_tmpdir_missing_uses_default(tmp_path):
         {
             "src": "/mnt/data",
             "dest": "/mnt/data/.snapshots",
-            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
         },
     )
     cfg = config.load_config(cfg_file, {})
@@ -322,7 +336,7 @@ def test_discover_configs_prefers_yaml_over_yml(tmp_path, monkeypatch):
             "src": "/a",
             "dest": "/b",
             "profiles": {
-                "daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}
+                "daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}
             },
         },
     )
@@ -332,7 +346,7 @@ def test_discover_configs_prefers_yaml_over_yml(tmp_path, monkeypatch):
             "src": "/c",
             "dest": "/d",
             "profiles": {
-                "daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}
+                "daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}
             },
         },
     )
@@ -342,7 +356,7 @@ def test_discover_configs_prefers_yaml_over_yml(tmp_path, monkeypatch):
             "src": "/e",
             "dest": "/f",
             "profiles": {
-                "daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}
+                "daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}
             },
         },
     )
@@ -360,7 +374,7 @@ def test_filter_profiles_unknown_raises(tmp_path):
         {
             "src": "/mnt/data",
             "dest": "/mnt/data/.snapshots",
-            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
         },
     )
     cfg = config.load_config(cfg_file, {})
@@ -375,7 +389,7 @@ def test_select_profiles_returns_none_when_absent(tmp_path):
         {
             "src": "/mnt/data",
             "dest": "/mnt/data/.snapshots",
-            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
         },
     )
     cfg = config.load_config(cfg_file, {})
@@ -394,7 +408,7 @@ def test_validate_remote_config_unknown_type(tmp_path):
             "profiles": {
                 "daily": {
                     "freq": {"full": "7d", "incr": "1d"},
-                    "keep": "30d",
+                    "keep": 30,
                     "remotes": [{"type": "s3", "bucket": "backups"}],
                 }
             },
@@ -420,7 +434,7 @@ def test_discover_configs_empty_dir_raises(tmp_path, monkeypatch):
 
 
 def _minimal_profile(src="/a", dest="/b"):
-    return {"src": src, "dest": dest, "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}}}
+    return {"src": src, "dest": dest, "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}}}
 
 
 def test_discover_configs_tolerant_reports_every_bad_file(tmp_path, monkeypatch):
@@ -510,7 +524,7 @@ def test_validate_errors_on_missing_age_recipient_path(tmp_path):
                 "algorithm": "age",
                 "recipients": ["/nonexistent/recipients.txt"],
             },
-            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
         },
     )
     cfg = config.load_config(cfg_file, {})
@@ -530,7 +544,7 @@ def _encryption_cfg(tmp_path, **encryption):
             "src": str(tmp_path / "src"),
             "dest": str(tmp_path / "dest"),
             "encryption": encryption,
-            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
         },
     )
     return cfg_file
@@ -570,7 +584,7 @@ def _validate_cfg(tmp_path, dest):
         {
             "src": str(tmp_path / "src"),
             "dest": str(dest),
-            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
         },
     )
     cfg = config.load_config(cfg_file, {})
@@ -629,7 +643,7 @@ def test_load_config_rejects_unsafe_profile_names(tmp_path, pname):
             "src": str(tmp_path / "src"),
             "dest": str(tmp_path / "dest"),
             "profiles": {
-                pname: {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}
+                pname: {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}
             },
         },
     )
@@ -646,7 +660,7 @@ def test_load_config_accepts_safe_profile_names(tmp_path, pname):
             "src": str(tmp_path / "src"),
             "dest": str(tmp_path / "dest"),
             "profiles": {
-                pname: {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}
+                pname: {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}
             },
         },
     )
@@ -659,7 +673,7 @@ def test_load_config_requires_absolute_paths(tmp_path, field):
     data = {
         "src": str(tmp_path / "src"),
         "dest": str(tmp_path / "dest"),
-        "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+        "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
     }
     data[field] = "relative/path"
     _write(cfg_file, data)
@@ -675,7 +689,7 @@ def test_load_config_requires_absolute_tmpdir(tmp_path):
             "src": str(tmp_path / "src"),
             "dest": str(tmp_path / "dest"),
             "tmpdir": "relative/tmp",
-            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
         },
     )
     with pytest.raises(config.ConfigError, match="'tmpdir' must be an absolute"):
@@ -690,7 +704,7 @@ def test_load_config_accepts_tilde_paths(tmp_path):
             "src": "~/src",
             "dest": "~/dest",
             "tmpdir": "~/tmp",
-            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
         },
     )
     cfg = config.load_config(cfg_file, {})
@@ -706,7 +720,7 @@ def test_empty_tmpdir_still_falls_back_to_default(tmp_path):
             "src": str(tmp_path / "src"),
             "dest": str(tmp_path / "dest"),
             "tmpdir": "",
-            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": "30d"}},
+            "profiles": {"daily": {"freq": {"full": "7d", "incr": "1d"}, "keep": 30}},
         },
     )
     assert config.load_config(cfg_file, {}).tmpdir == config.DEFAULT_TMPDIR

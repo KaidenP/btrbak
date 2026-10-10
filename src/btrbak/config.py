@@ -431,12 +431,20 @@ def _parse_profile(name, praw, auth, path) -> Profile:
     try:
         freq_full = timespan.parse(freq.get("full"))
         freq_incr = timespan.parse(freq.get("incr"))
-        keep = timespan.parse(praw.get("keep"))
     except ValueError as exc:
         raise ConfigError(f"{path}: profile {name!r}: {exc}")
 
-    if timespan.is_never(keep):
-        raise ConfigError(f"{path}: profile {name!r}: 'keep' cannot be -1")
+    keep = praw.get("keep")
+    if isinstance(keep, bool) or not isinstance(keep, int):
+        raise ConfigError(
+            f"{path}: profile {name!r}: 'keep' must be a positive integer "
+            f"or -1 (keep forever), not {keep!r}"
+        )
+    if keep != -1 and keep < 1:
+        raise ConfigError(
+            f"{path}: profile {name!r}: 'keep' must be a positive integer "
+            f"or -1 (keep forever), not {keep!r}"
+        )
 
     remotes_raw = praw.get("remotes")
     if remotes_raw is None:
@@ -672,11 +680,6 @@ def validate(config: Config, check_remotes=True, check_nesting=True):
         _check_permissions(AUTH_PATH, "auth.yaml", warnings)
 
     for profile in config.profiles.values():
-        if not timespan.is_never(profile.freq_incr) and profile.keep < profile.freq_incr:
-            warnings.append(
-                f"profile {profile.name}: keep ({profile.keep}s) is shorter than "
-                f"freq.incr ({profile.freq_incr}s); backups may be pruned immediately"
-            )
         for remote in profile.remotes:
             try:
                 instance = create_remote(remote)

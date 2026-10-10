@@ -7,9 +7,9 @@ After=local-fs.target
 
 [Service]
 Type=oneshot
-# Snapshot the members of the `boot` group in /etc/btrbak/groups.yaml.
+# Full-snapshot the members of the `boot` group in /etc/btrbak/groups.yaml.
 # The group is empty by default, so this is a no-op until configured.
-ExecStart=/usr/bin/btrbak run --group boot --force
+ExecStart=/usr/bin/btrbak run --group boot --force --full
 Nice=10
 IOSchedulingClass=idle
 NoNewPrivileges=yes

@@ -27,12 +27,12 @@ encryption:
   identity: /root/.config/age/keys.txt
 
 profiles:
-  # Offsite hourly increments, rolled into a weekly full, kept for a month.
+  # Offsite hourly increments, rolled into a weekly full; keep 30 backups.
   hourly:
     freq:
       full: 1w
       incr: 1h
-    keep: 1mo
+    keep: 30
     remotes:
       - type: dir
         name: offsite
@@ -48,5 +48,5 @@ profiles:
     freq:
       full: 1w
       incr: -1
-    keep: 2mo
+    keep: 14
     remotes: []

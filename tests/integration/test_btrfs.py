@@ -195,7 +195,7 @@ def _pipeline_cfg(mnt, name, src, snapshots, remote_root, tmpdir):
         "    freq:\n"
         "      full: 7d\n"
         "      incr: 1d\n"
-        "    keep: 100s\n"
+        "    keep: 1\n"
         "    remotes:\n"
         "      - name: offsite\n"
         "        type: dir\n"
@@ -214,7 +214,7 @@ def _pipeline_cfg(mnt, name, src, snapshots, remote_root, tmpdir):
                 name="daily",
                 freq_full=7 * 86400,
                 freq_incr=86400,
-                keep=100,
+                keep=1,
                 remotes=[
                     RemoteSpec(
                         "offsite",
@@ -264,20 +264,22 @@ def test_full_pipeline_backup_restore_and_prune(btrfs_fs, monkeypatch):
     assert (target / incr_id / "a.txt").read_text() == "a\n"
     assert (target / incr_id / "b.txt").read_text() == "b\n"
 
-    # A young child must protect its old full parent from pruning.
-    meta = manifest.load(snapshots / "meta.yaml")
-    by_profile = cli.collect_remotes(cfg)
+    # Re-root the chain with a new full. keep=1 retains only the newest
+    # snapshot (plus any parents it needs), so the superseded full1 -> incr
+    # branch is pruned leaf-first in the same run.
+    (src / "c.txt").write_text("c\n")
     monkeypatch.setattr(cli.util, "now", lambda: 150)
-    cli.prune(cfg, meta, by_profile)
-    remaining = [snap["id"] for snap in manifest.snapshots(meta, "daily")]
-    assert full_id in remaining and incr_id in remaining
+    assert cli.run_config(cfg, None, force=True, force_config=False, full=True, dry_run=False) == 0
 
-    # Once both are past retention, pruning cascades leaf-first.
-    monkeypatch.setattr(cli.util, "now", lambda: 1000)
-    cli.prune(cfg, meta, by_profile)
-    assert manifest.snapshots(meta, "daily") == []
+    meta = manifest.load(snapshots / "meta.yaml")
+    snaps = manifest.snapshots(meta, "daily")
+    assert len(snaps) == 1
+    full2_id = snaps[0]["id"]
+    assert snaps[0]["type"] == "full"
+    assert (snapshots / "daily" / full2_id).exists()
     assert not (snapshots / "daily" / full_id).exists()
     assert not (snapshots / "daily" / incr_id).exists()
+    assert (remote_root / "daily" / f"{full2_id}.send").exists()
     assert not (remote_root / "daily" / f"{full_id}.send").exists()
     assert not (remote_root / "daily" / f"{incr_id}.send").exists()
 
@@ -450,8 +452,8 @@ def test_verify_reports_a_snapshot_whose_remotes_were_all_removed(btrfs_fs, monk
     """A profile that loses its remotes settles into a state verify must accept.
 
     Reconcile marks the orphaned entry `committed: true` so retention prunes
-    it by age like a local snapshot; verify flagging it INCOMPLETE would make
-    every run exit 1 until `keep` expires.
+    it like any committed snapshot; verify flagging it INCOMPLETE would make
+    every run exit 1 until retention prunes it.
     """
     mnt = btrfs_fs
     src, snapshots, _target = _setup(mnt, "orphaned")
