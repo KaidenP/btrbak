@@ -966,10 +966,11 @@ btrbak gdrive authorize --client-secret PATH [--token PATH] [--console]
   disaster-recovery restores work when `dest` is absent or read-only. Both
   stage their downloads in a scratch directory under `tmpdir` and remove it
   again when it is left empty, so repeated invocations do not accumulate
-  directories. The `run` lock is taken non-blockingly (a timer-driven run
-  should skip rather than queue), while `verify`, `restore` and `forget` wait
-  up to 30 s: the only routine holder of the tmpdir lock is a `run` doing its
-  brief staging sweep, and that moment must not fail a verify outright.
+  directories. Lock acquisition now waits up to 10 minutes for the lock to be
+  released: `run` takes `<dest>/.btrbak.lock` with this timeout (so a
+  timer-driven run queues behind a concurrent run instead of failing
+  immediately), and `verify`, `restore` and `forget` wait the same way for the
+  brief moment a concurrent `run` holds the tmpdir lock for its staging sweep.
 - Everything btrbak stages under `tmpdir` is private: directories it creates
   are `0700` and files it creates are `0600` (explicit `os.open` modes, not
   the default `0644` under umask). A staged send stream is an entire

@@ -1,3 +1,11 @@
+btrbak (1.2.3-1) unstable; urgency=medium
+
+  * Wait up to 10 minutes for a held lock to be released instead of failing
+    fast, so a timer-driven run queues behind a concurrent run and
+    verify/restore/forget survive a run's brief staging sweep.
+
+ -- Kaiden <11036039+KaidenP@users.noreply.github.com>  Mon, 12 Oct 2026 01:35:03 -0400
+
 btrbak (1.2.2-1) unstable; urgency=medium
 
   * Let the boot-snapshot hook reach remotes: order

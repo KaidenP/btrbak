@@ -41,6 +41,11 @@ RESTORE_SCRATCH = ".restore"
 _MAX_STDERR_LINES = 20
 
 
+#: Default seconds :func:`exclusive_lock` waits for a held lock to be
+#: released before failing (ten minutes).
+LOCK_TIMEOUT = 600.0
+
+
 def _is_real_file(obj) -> bool:
     """Return True when *obj* is a real file object with a working ``fileno()``.
 
@@ -134,17 +139,17 @@ def snapshot_id(ts=None) -> str:
 
 
 @contextlib.contextmanager
-def exclusive_lock(path, timeout=None):
+def exclusive_lock(path, timeout: float | None = LOCK_TIMEOUT):
     """Acquire an exclusive ``flock`` on *path*.
 
-    Raises :class:`BtrbakError` when another process holds the lock for
-    longer than *timeout* seconds; with the default ``timeout=None`` the
-    acquisition is non-blocking and a held lock fails immediately.
+    Waits up to *timeout* seconds for a held lock to be released, then
+    raises :class:`BtrbakError`; the default is :data:`LOCK_TIMEOUT` (ten
+    minutes). Pass ``timeout=None`` for a non-blocking acquisition that
+    fails immediately when the lock is already held.
 
-    ``run`` uses the non-blocking form (a timer-driven run should skip rather
-    than queue behind a long restore), while ``verify``/``restore``/``forget``
-    pass a timeout so the brief moment a concurrent ``run`` holds the tmpdir
-    lock for its staging sweep does not fail them outright.
+    ``run``, ``verify``, ``restore`` and ``forget`` all acquire their locks
+    through this default, so a held lock is waited for rather than failed on
+    immediately.
     """
     fd = _open_lock(path)
     try:

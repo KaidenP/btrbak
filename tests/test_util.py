@@ -358,6 +358,32 @@ def test_exclusive_lock_waits_for_release_within_timeout(tmp_path):
         thread.join()
 
 
+def test_exclusive_lock_default_waits_for_release(tmp_path):
+    """The default timeout must wait for a briefly-held lock to be released."""
+    import fcntl
+    import os
+    import threading
+
+    path = tmp_path / "a.lock"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def release():
+        import time
+
+        time.sleep(0.2)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    thread = threading.Thread(target=release)
+    thread.start()
+    try:
+        with util.exclusive_lock(path):
+            pass
+    finally:
+        thread.join()
+
+
 def test_exclusive_lock_timeout_expires(tmp_path):
     import fcntl
     import os
@@ -374,7 +400,7 @@ def test_exclusive_lock_timeout_expires(tmp_path):
         os.close(fd)
 
 
-def test_exclusive_lock_default_still_fails_fast(tmp_path):
+def test_exclusive_lock_none_timeout_fails_fast(tmp_path):
     import fcntl
     import os
 
@@ -383,7 +409,7 @@ def test_exclusive_lock_default_still_fails_fast(tmp_path):
     fcntl.flock(fd, fcntl.LOCK_EX)
     try:
         with pytest.raises(util.BtrbakError, match="held by another process"):
-            with util.exclusive_lock(path):
+            with util.exclusive_lock(path, timeout=None):
                 pass
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)

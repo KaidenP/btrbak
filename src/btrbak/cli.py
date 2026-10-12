@@ -21,10 +21,6 @@ from .remotes.base import RemoteError, RemoteNotFoundError
 
 VERBOSITY = 0
 
-#: Seconds ``verify``/``restore``/``forget`` wait for a lock another command
-#: holds only briefly (e.g. a ``run`` doing its staging sweep) before failing.
-LOCK_WAIT = 30.0
-
 
 def _log(level, message) -> None:
     if VERBOSITY >= level:
@@ -1365,7 +1361,7 @@ def _verify_config(cfg, configured=None) -> int:
     out are not reported as orphans.
     """
     configured_profiles = set(cfg.profiles) if configured is None else set(configured)
-    with util.exclusive_lock(cfg.tmpdir / (cfg.name + ".lock"), timeout=LOCK_WAIT):
+    with util.exclusive_lock(cfg.tmpdir / (cfg.name + ".lock")):
         failures = 0
         meta, used_remote = _load_meta_for_verify(cfg)
         if meta is None:
@@ -1516,7 +1512,7 @@ def cmd_restore(args) -> int:
     remote_errors = config_mod.validate_remote_config(cfg, args.profile)
     if remote_errors:
         raise config_mod.ConfigError("\n".join(remote_errors))
-    with util.exclusive_lock(cfg.tmpdir / (cfg.name + ".lock"), timeout=LOCK_WAIT):
+    with util.exclusive_lock(cfg.tmpdir / (cfg.name + ".lock")):
         restore_mod.run_restore(cfg, args.profile, args.snapshot_id, args.target)
     return 0
 
@@ -1554,7 +1550,7 @@ def cmd_forget(args) -> int:
             "truth, so there is nothing to forget"
         )
 
-    with util.exclusive_lock(cfg.dest / ".btrbak.lock", timeout=LOCK_WAIT):
+    with util.exclusive_lock(cfg.dest / ".btrbak.lock"):
         meta = manifest.load(meta_path)
         snap = manifest.get_snapshot(meta, args.profile, args.snapshot_id)
         if snap is None:
