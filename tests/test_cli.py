@@ -665,6 +665,21 @@ def test_clean_tmpdir_removes_empty_dirs(tmp_path, monkeypatch):
     assert not (root / "a").exists()
 
 
+def test_clean_tmpdir_max_age_zero_removes_fresh_files(tmp_path, monkeypatch):
+    cfg = _cfg({})
+    cfg.tmpdir = tmp_path / "tmp"
+    root = cfg.tmpdir / cfg.name
+    root.mkdir(parents=True)
+    fresh = root / "fresh.send"
+    fresh.write_text("x")
+    monkeypatch.setattr(cli.util, "now", lambda: 59000)
+
+    cli.clean_tmpdir(cfg, max_age=0)
+
+    assert not fresh.exists()
+    assert root.exists()
+
+
 def test_sync_settings_conflict_is_runtime_error(tmp_path):
     cfg = _cfg({})
     cfg.tmpdir = tmp_path / "tmp"
@@ -1637,7 +1652,8 @@ def test_run_config_cleans_tmpdir_when_lock_free(tmp_path, monkeypatch):
     assert (
         cli.run_config(cfg, None, True, True, False, False) == 0
     )
-    assert cleaned == [cfg]
+    # Swept before the first snapshot and again after the profiles finish.
+    assert cleaned == [cfg, cfg]
 
 
 def test_run_config_skips_tmpdir_cleanup_when_lock_held(tmp_path, monkeypatch):

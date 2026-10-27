@@ -256,8 +256,8 @@ def _sweep_stale_scratch(tmpdir: Path) -> None:
 
     These are only cleaned by ``finally`` blocks, so an unclean termination
     (SIGKILL, power loss) can leave decrypted plaintext behind; sweep it at
-    the start of every restore instead of waiting for ``run``'s 24 h tmpdir
-    sweeper.
+    the start of every restore instead of waiting for ``run``'s pre-backup
+    tmpdir sweep.
     """
     if not tmpdir.is_dir():
         return

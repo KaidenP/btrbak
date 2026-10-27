@@ -509,15 +509,13 @@ def run_config(
         ensure_profile_meta(meta, selected)
         by_profile = collect_remotes(selected)
 
-        # Reap stale staging files only while holding the same advisory lock
-        # `verify` and `restore` use, so a long-running restore can never have
-        # its staging directory swept out from under it. Contention is benign
-        # here: skipping the sweep must not block the backup itself.
-        with util.optional_lock(selected.tmpdir / (selected.name + ".lock")) as got:
-            if got:
-                clean_tmpdir(selected)
-            else:
-                _log(1, "staging directory is in use by another command; skipping cleanup")
+        # Reap leftover staging files before the first snapshot is created so
+        # anything a killed earlier run left behind can never be baked into a
+        # snapshot of src. The sweep takes the same advisory lock `verify` and
+        # `restore` hold for their whole download, so a running restore is
+        # never swept out from under it; contention skips the sweep instead of
+        # blocking the backup, and the next run reaps the straggler.
+        _sweep_staging(selected)
 
         failures = 0
         for pname, profile in selected.profiles.items():
@@ -547,6 +545,10 @@ def run_config(
         # authoritative and the remote copy is refreshed on the next run, so a
         # remote hiccup here must not fail an otherwise successful backup.
         _push_manifest_best_effort(meta_path, by_profile)
+        # Sweep again on the way out: a send that died partway through its
+        # pipeline can still strand an intermediate even though each profile's
+        # own finally removed the final staged file.
+        _sweep_staging(selected)
     return failures
 
 
@@ -1100,7 +1102,32 @@ def unique_snapshot_id(base, profile_dir, meta=None, profile=None) -> str:
     return candidate
 
 
+def _sweep_staging(cfg, max_age=0) -> None:
+    """Reap leftover staging files under ``tmpdir``, holding the staging lock.
+
+    ``run`` calls this before it snapshots ``src`` (so a file a killed earlier
+    run left behind cannot be swept into the snapshot) and again after the
+    profiles finish (so a failed send does not strand an intermediate). It only
+    sweeps while it can grab the same advisory lock ``verify``/``restore`` hold
+    for the length of their downloads; contention skips the sweep rather than
+    blocking the backup, and the next run simply reaps the straggler.
+    """
+    with util.optional_lock(cfg.tmpdir / (cfg.name + ".lock")) as got:
+        if got:
+            clean_tmpdir(cfg, max_age=max_age)
+        else:
+            _log(1, "staging directory is in use by another command; skipping cleanup")
+
+
 def clean_tmpdir(cfg, max_age=86400) -> None:
+    """Remove staging files under ``tmpdir/<subvol>``, then empty directories.
+
+    Only files older than *max_age* seconds are removed, except that
+    ``max_age <= 0`` removes every file regardless of age. ``run`` uses that
+    before its first snapshot because nothing current has been staged yet, so
+    anything present is a leftover. Empty directories are pruned leaf-first,
+    keeping the staging root itself.
+    """
     root = cfg.tmpdir / cfg.name
     if not root.exists():
         return
@@ -1108,7 +1135,7 @@ def clean_tmpdir(cfg, max_age=86400) -> None:
     for path in root.rglob("*"):
         if path.is_file():
             try:
-                if now_ts - path.stat().st_mtime > max_age:
+                if max_age <= 0 or now_ts - path.stat().st_mtime > max_age:
                     path.unlink()
             except OSError:
                 pass
