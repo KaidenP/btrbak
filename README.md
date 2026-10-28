@@ -21,13 +21,13 @@ artifact, then install it with apt so the dependencies are resolved
 automatically:
 
 ```
-sudo apt-get install ./btrbak_1.2.4-1_all.deb
+sudo apt-get install ./btrbak_1.2.5-1_all.deb
 ```
 
 Or, if you already have `python3`, `python3-yaml`, and `btrfs-progs` installed:
 
 ```
-sudo dpkg -i btrbak_1.2.4-1_all.deb
+sudo dpkg -i btrbak_1.2.5-1_all.deb
 ```
 
 The package installs:
@@ -276,7 +276,7 @@ Build a binary `.deb` without needing debhelper or dh-python:
 ./debian/build-deb.sh
 ```
 
-The script produces `dist/btrbak_1.2.4-1_all.deb`. It installs:
+The script produces `dist/btrbak_1.2.5-1_all.deb`. It installs:
 
 - `/usr/bin/btrbak`
 - the `btrbak` package into `/usr/lib/python3/dist-packages/btrbak`
@@ -351,18 +351,19 @@ event hooks below are no-ops until you add members.
 
 Two event hooks are installed and enabled by default:
 
-- `btrbak-snapshot-boot.service` — runs `btrbak run --group boot --force --full` on boot
-- `/etc/apt/apt.conf.d/80btrbak` — runs `btrbak run --group apt --force --full` before
+- `btrbak-snapshot-boot.service` — runs `btrbak run --group boot --force` on boot
+- `/etc/apt/apt.conf.d/80btrbak` — runs `btrbak run --group apt --force` before
   package installs/upgrades
 
 The apt hook is a `DPkg::Pre-Invoke` that runs
 `/usr/lib/btrbak/btrbak-apt-pre`, which in turn runs
-`btrbak run --group apt --force --full`. It snapshots exactly the profiles
+`btrbak run --group apt --force`. It snapshots exactly the profiles
 named by the `apt` group — with the default empty group it snapshots nothing.
 `--force` bypasses the normal `freq` schedule so a snapshot is taken even when
-nothing is due, and `--full` makes it a full snapshot rather than an
-incremental: every apt transaction and boot captures a complete, self-contained
-restore point (at the cost of a full `btrfs send` each time).
+nothing is due. The snapshot is incremental, with a full only when the profile
+has no offsite backup yet (a chain needs a root) or `freq.full` has elapsed
+since the last full — so apt transactions and boots stay cheap in the common
+case instead of re-sending a full stream each time.
 
 apt may invoke dpkg several times in one transaction, so the script
 de-duplicates: it writes a marker at `/run/btrbak/apt-pre.stamp` (one-hour TTL)

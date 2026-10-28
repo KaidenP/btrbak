@@ -8,9 +8,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# Full-snapshot the members of the `boot` group in /etc/btrbak/groups.yaml.
+# Snapshot the members of the `boot` group in /etc/btrbak/groups.yaml.
 # The group is empty by default, so this is a no-op until configured.
-ExecStart=/usr/bin/btrbak run --group boot --force --full
+ExecStart=/usr/bin/btrbak run --group boot --force
 Nice=10
 IOSchedulingClass=idle
 NoNewPrivileges=yes

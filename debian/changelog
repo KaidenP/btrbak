@@ -1,3 +1,12 @@
+btrbak (1.2.5-1) unstable; urgency=medium
+
+  * Snapshot the apt and boot hooks incrementally (drop `--full`): a full is
+    taken only when the profile has no offsite backup yet (a chain needs a
+    root) or `freq.full` has elapsed, instead of re-sending a full stream on
+    every event.
+
+ -- Kaiden <11036039+KaidenP@users.noreply.github.com>  Tue, 27 Oct 2026 21:11:00 -0400
+
 btrbak (1.2.4-1) unstable; urgency=medium
 
   * Sweep leftover staging files before the first snapshot of a run (not just
